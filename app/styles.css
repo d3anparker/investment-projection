@@ -1,0 +1,683 @@
+:root {
+  --bg: #0f1420;
+  --panel: #171d2b;
+  --panel-2: #1e2636;
+  --line: #2b3448;
+  --text: #e7ecf5;
+  --muted: #9aa7bd;
+  --muted-strong: #c3cee2;
+  --accent: #4f8cff;
+  --accent-soft: rgba(79, 140, 255, 0.16);
+  --good: #35c98a;
+  --bad: #ff6b6b;
+  --bad-soft: rgba(255, 107, 107, 0.12);
+  --radius: 12px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+/* Light palette. Every token the dark theme defines is redefined here, so the
+   chart — whose SVG references these same custom properties — follows along
+   without duplicating a palette in Rust. Contrast was checked against the
+   surface each token actually sits on, not just against white. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2f5fa;
+    --panel: #ffffff;
+    --panel-2: #f1f4fa;
+    --line: #cfd7e6;
+    --text: #101722;
+    --muted: #556074;
+    --muted-strong: #333d4d;
+    --accent: #1a56c4;
+    --accent-soft: rgba(26, 86, 196, 0.09);
+    --good: #0b7346;
+    --bad: #bc2626;
+    --bad-soft: rgba(188, 38, 38, 0.07);
+    --shadow: 0 8px 24px rgba(16, 23, 34, 0.08);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  background: radial-gradient(1200px 600px at 80% -10%, #1a233a, transparent),
+    var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+@media (prefers-color-scheme: light) {
+  html {
+    color-scheme: light;
+  }
+
+  body {
+    background: radial-gradient(1200px 600px at 80% -10%, #e3ebfb, transparent),
+      var(--bg);
+  }
+}
+
+/* Opacity and colour transitions are the only motion here, but honour the
+   preference rather than assuming "subtle" means "welcome". */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 32px 20px 60px;
+}
+
+.site-head h1 {
+  margin: 0 0 6px;
+  font-size: clamp(1.6rem, 2.5vw, 2.2rem);
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 0;
+  max-width: 60ch;
+  color: var(--muted);
+}
+
+.disclaimer {
+  margin: 20px 0 24px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.disclaimer strong {
+  color: var(--text);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 22px;
+}
+
+@media (min-width: 960px) {
+  .layout {
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    /* `stretch`, not `start`: the form is inherently shorter than the
+       breakdown, and `start` left the difference as a ragged hole in the page
+       background. Stretched, the spare room sits inside the panel — where the
+       rule below spends it by pushing the horizon control to the foot. */
+    align-items: stretch;
+  }
+
+  /* The headline figures span both columns above the form and the breakdown.
+     A short form column beside a tall results column left ~340px of dead
+     space; hoisting the summary out shortens the results column and gives the
+     numbers the width they deserve as the page's answer. */
+  .panel-summary {
+    grid-column: 1 / -1;
+  }
+
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+
+
+.panel h2 {
+  margin: 0 0 16px;
+  font-size: 1.15rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+/* Explains the derived "Annualised" column. A `<caption>` rather than a `title`
+   tooltip so keyboard and touch users get it too; `caption-side: bottom` keeps
+   it out of the way of the figures while staying part of the table for screen
+   readers. */
+.table-note {
+  caption-side: bottom;
+  margin-top: 10px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--muted);
+  text-align: left;
+}
+
+.breakdown th {
+  text-align: left;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 8px 8px;
+}
+
+/* investment editor: stacked labelled cards (mobile) → aligned grid (desktop) */
+.inv-head {
+  display: none;
+}
+
+.inv-row {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.fld {
+  display: block;
+  min-width: 0;
+}
+
+.fld-lbl {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.return-control {
+  display: flex;
+  gap: 6px;
+}
+
+.return-control .adorn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.return-control select {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+/* £ / % adornments — cosmetic only, never touch the parsed value */
+.adorn {
+  position: relative;
+  display: block;
+}
+
+.adorn-money::before,
+.adorn-pct::after {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.adorn-money::before {
+  content: "\00a3";
+  left: 9px;
+}
+
+.adorn-money input {
+  padding-left: 20px;
+}
+
+.adorn-pct::after {
+  content: "%";
+  right: 9px;
+}
+
+.adorn-pct input {
+  padding-right: 20px;
+}
+
+@media (min-width: 620px) {
+  .inv-head,
+  .inv-row {
+    display: grid;
+    grid-template-columns:
+      minmax(0, 1.9fr) minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1.55fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .inv-head {
+    padding: 0 0 6px;
+  }
+
+  .inv-head span {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .inv-row {
+    padding: 0;
+    margin-bottom: 8px;
+    background: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  /* header row already labels the columns; hide per-field labels visually
+     but keep them in the accessibility tree as each input's name */
+  .fld-lbl {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+/* form controls */
+input,
+select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  min-width: 0;
+}
+
+/* Buttons are included because removing a row moves focus to a sibling remove
+   button (or to "+ Add investment"); that landing spot has to be visible, and
+   the UA default ring is not the accent ring used everywhere else. Buttons use
+   `:focus-visible` so a mouse click doesn't leave a ring behind. */
+input:focus,
+select:focus,
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+
+/* The control an error is about. Paired with `aria-invalid` and an
+   `aria-describedby` pointing at the message, so the field is identifiable
+   without reading the sentence at the foot of the form. The `:focus` rule is
+   here to outrank `input:focus` above — the accent outline still shows, but the
+   border stays red so the field does not look resolved just by being focused. */
+.field-invalid {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+
+.field-invalid:focus {
+  border-color: var(--bad);
+}
+
+/* strip the native number spinners — they clutter these money/percent fields
+   and their arrows collide with the £/% adornments, clipping short values */
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.btn {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  padding: 9px 14px;
+  color: var(--text);
+  background: var(--panel-2);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn-ghost {
+  margin-top: 12px;
+  background: transparent;
+}
+
+/* mobile: a clear "× Remove" control aligned to the card's end */
+.btn-remove {
+  position: relative;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  color: var(--muted);
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+/* Extend the pointer target to 44px square without changing the visual size or
+   the grid row height. 2.5.8 AA only asks 24px, which the drawn button already
+   met, but 44px is the comfortable thumb target and this is the control whose
+   mis-tap costs the user a row of typing. */
+.btn-remove::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+.btn-remove .rm-x {
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.btn-remove:hover {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+/* desktop: collapse to a compact icon button in the grid's last column */
+@media (min-width: 620px) {
+  .btn-remove {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    justify-content: center;
+    background: transparent;
+    border-color: transparent;
+  }
+
+  .btn-remove .rm-label {
+    display: none;
+  }
+
+  .btn-remove:hover {
+    border-color: var(--bad);
+  }
+}
+
+.horizon {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+
+/* Spends the stretched panel's spare height, settling the horizon control at
+   the foot of the form rather than leaving a gap beneath it. Must come *after*
+   the `.horizon` rule above: media queries add no specificity, so source order
+   is what decides between `auto` and the 22px default. Desktop only — stacked,
+   the panels are their content height and `auto` would do nothing. */
+@media (min-width: 960px) {
+  .horizon {
+    margin-top: auto;
+  }
+}
+
+.horizon label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.horizon input {
+  width: 84px;
+}
+
+.horizon select {
+  width: auto;
+}
+
+.error-msg {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid rgba(255, 107, 107, 0.4);
+  color: #ffb4b4;
+  font-size: 0.9rem;
+}
+
+/* results */
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.stat {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.stat-accent {
+  background: var(--accent-soft);
+  border-color: rgba(79, 140, 255, 0.5);
+}
+
+.stat-label {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  display: block;
+  font-size: clamp(1rem, 2.6vw, 1.15rem);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The projection is the answer the page exists to give. At the same size as
+   the figures that feed it, it did not read as the headline. */
+.stat-accent .stat-value {
+  font-size: clamp(1.6rem, 4vw, 2.15rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+/* States the basis of the percentage above it, which is otherwise a bare
+   number against an unstated denominator. */
+.stat-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* Held-over figures while an input is invalid: dimmed to show they are not
+   current, but kept on screen — blanking the panel for a half-typed number
+   loses the user's place. `aria-busy` carries the same meaning non-visually. */
+.results-body {
+  transition: opacity 0.18s ease;
+}
+
+.results-body.stale {
+  opacity: 0.4;
+}
+
+.stat-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-figure {
+  margin: 0 0 18px;
+}
+
+/* The chart's labels are sized in SVG viewBox units, so their on-screen size is
+   purely a function of how wide the chart renders: font-size * width / 640.
+   Left to fill the container it hit ~8px on a 375px phone and ~11px in the
+   desktop results column. Pin the width into a band instead — scroll sideways
+   below the floor rather than shrink the type, and centre below the ceiling so
+   the single-column layout doesn't blow the labels up. Paired with
+   `AXIS_FONT` in chart.rs; change the two together. */
+.chart-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* The sized, positioned box: the SVG, the scrub marker and the slider overlay
+   all share these bounds, which is what keeps the marker on the data. */
+.chart-stage {
+  position: relative;
+  min-width: 400px;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.chart {
+  width: 100%;
+}
+
+/* Vertical rule at the scrubbed month. Positioned from the plot fractions
+   exported by chart.rs, so it tracks the viewBox rather than guessing. */
+.chart-marker {
+  position: absolute;
+  width: 0;
+  border-left: 1px dashed var(--muted-strong);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chart-marker.on {
+  opacity: 1;
+}
+
+.chart-scrub {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+}
+
+.chart-scrub:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Reserves its own height so switching between the hint and a reading does not
+   shift the caption and table below it. */
+.chart-readout {
+  margin-top: 8px;
+  min-height: 2.6em;
+  text-align: center;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.chart-caption {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* empty state: reserve roughly the chart's height so the panel doesn't jump */
+.chart-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  margin: 0;
+  padding: 0 16px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.breakdown td {
+  padding: 8px;
+  border-top: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+
+.breakdown td:first-child {
+  font-variant-numeric: normal;
+}
+
+.num {
+  text-align: right;
+}
+
+.site-foot {
+  margin-top: 34px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

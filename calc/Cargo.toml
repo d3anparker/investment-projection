@@ -1,0 +1,8 @@
+[package]
+name = "calc"
+version = "0.1.0"
+edition = "2021"
+description = "Exact-decimal investment projection core (pure library, natively testable)"
+
+[dependencies]
+rust_decimal = { version = "1", features = ["maths"] }

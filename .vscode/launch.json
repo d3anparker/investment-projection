@@ -1,0 +1,45 @@
+{
+  // Native debugging for the `calc` crate via CodeLLDB (vadimcn.vscode-lldb).
+  //
+  // Why only `calc`: the `app` crate is Rust->WASM running in the browser, so
+  // there is no native process to attach a Rust debugger to (see CLAUDE.md).
+  // All the numeric logic lives in `calc` and is unit-tested, so drive a test
+  // to the state you want to inspect, set a breakpoint, and step through it.
+  //
+  // Builds honour CARGO_TARGET_DIR (/home/vscode/target in the devcontainer);
+  // CodeLLDB reads the artifact path from cargo, so nothing extra is needed.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug all calc unit tests",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=calc"],
+        "filter": { "kind": "lib" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug one calc test (by name)",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=calc"],
+        "filter": { "kind": "lib" }
+      },
+      // Runs only tests whose name contains ${input:testName}. Drop --exact
+      // (below) for substring matching; keep it to match one test exactly.
+      "args": ["${input:testName}", "--exact", "--nocapture"],
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testName",
+      "type": "promptString",
+      "description": "calc test name to debug (e.g. tests::contributions_add_up_and_are_excluded_from_growth)"
+    }
+  ]
+}

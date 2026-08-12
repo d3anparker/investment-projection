@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["app", "calc"]
+
+# Shared across every workspace member; profiles are only honoured in the
+# workspace-root manifest, so they live here rather than in a member crate.
+[profile.release]
+opt-level = "s"
+# Fat LTO is deliberate. Measured against `lto = "thin"` on an otherwise identical
+# `docker compose build`: thin saved 1.5s on a then-25s rebuild (noise) and cost 8.9%
+# of wasm size (246,197 -> 268,059 bytes). Not a trade worth making here.
+lto = true

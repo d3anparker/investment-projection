@@ -1,0 +1,5 @@
+# Rust build artifacts (workspace shares a single root target/)
+/target
+
+# Trunk build output (emitted inside the app crate)
+/app/dist

@@ -1,0 +1,11 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+description = "Leptos (Rust/WASM) front end for the investment projection core"
+
+[dependencies]
+leptos = { version = "0.6", features = ["csr"] }
+calc = { path = "../calc" }
+rust_decimal = { version = "1", features = ["maths"] }
+console_error_panic_hook = "0.1"

@@ -1,0 +1,79 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a queued run supersede an in-flight one, but never cancel a live deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  TRUNK_VERSION: v0.21.14   # keep in step with Dockerfile / devcontainer.json
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('Cargo.lock') }}
+      # Native (non-WASM) run of calc's decimal tests plus app's format/chart tests.
+      - run: cargo test --workspace
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup target add wasm32-unknown-unknown
+
+      # Trunk's own prebuilt binary - seconds, vs ~2 min for `cargo install trunk`.
+      - name: Install Trunk
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf- -C /usr/local/bin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/trunk     # wasm-bindgen-cli + wasm-opt that Trunk downloads
+            target
+          key: cargo-wasm-${{ hashFiles('Cargo.lock') }}
+
+      - uses: actions/configure-pages@v5
+
+      # Trunk must run from inside app/ - virtual workspace, see CLAUDE.md.
+      # --public-url makes the emitted asset hrefs relative so they resolve
+      # under the /investment-projection/ subpath.
+      - name: Build
+        working-directory: app
+        run: trunk build --release --public-url ./
+
+      # Belt and braces; the Pages Actions path doesn't run Jekyll anyway.
+      - run: touch app/dist/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app/dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
