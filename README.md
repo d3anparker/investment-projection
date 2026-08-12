@@ -13,8 +13,7 @@ parse. The chart is scrubbable: point at it, or focus it and use the arrow
 keys, to read the projected value at any month along the way. It follows your
 system light/dark preference.
 
-**Live demo:** <https://your-username.github.io/investment-projection/> (replace
-`your-username` after the first deploy).
+**Live demo:** <https://d3anparker.github.io/investment-projection/>
 
 > **Not financial advice.** This is a mathematical extrapolation from a rate you
 > supply — for entertainment and curiosity, not planning. Past performance does
