@@ -10,7 +10,8 @@
 //! - [`outcome`] — a recomputation's result plus the error→control mapping;
 //!   pure and natively tested.
 //! - [`model`] — the reactive [`Row`] and its DOM helpers (signals, focus).
-//! - [`summary`] / [`results`] — the two output panels' views.
+//! - [`summary`] / [`results`] — the two output panels' views, both wrapped by
+//!   [`panel`]'s shared last-good/`.stale` shell.
 //! - [`format`] / [`chart`] — `Decimal`→string formatting and the SVG chart.
 //!
 //! `main.rs` keeps only the mount and the top-level [`App`] that wires these
@@ -21,6 +22,7 @@ mod convert;
 mod format;
 mod model;
 mod outcome;
+mod panel;
 mod results;
 mod summary;
 
@@ -50,9 +52,10 @@ fn App() -> impl IntoView {
 
     // Single source of computed truth. Reading every field's signal here means
     // the projection recomputes whenever any input changes; the memo caches the
-    // result so `calculate` runs once even though we read it in two places
-    // (error line + results panel). Blank-row filtering and the `row_ids`
-    // mapping that survives it live in `convert::build_input`.
+    // result so `calculate` runs once even though several readers want it (the
+    // error line, each control's invalid flag, and the `displayed`/`stale`
+    // memos). Blank-row filtering and the `row_ids` mapping that survives it
+    // live in `convert::build_input`.
     let outcome = create_memo(move |_| {
         let row_data: Vec<RowData> = rows
             .get()
@@ -86,9 +89,14 @@ fn App() -> impl IntoView {
     });
 
     // True while the current input is mid-error, so `displayed` is holding the
-    // last good projection rather than a current one. Both output panels dim
-    // themselves (`.stale`/`aria-busy`) on it.
-    let stale = Signal::derive(move || outcome.get().error().is_some());
+    // last good projection rather than a current one. Both output panels bind
+    // it to `.stale`/`aria-busy` (see `panel::stale_body`). A memo rather than
+    // `Signal::derive`, because a derived signal re-runs at every read: those
+    // bindings would then be subscribed to `outcome` itself and rewrite the
+    // class on every keystroke rather than when the flag actually flips.
+    // `with` reads the error without cloning the whole `Outcome`, both
+    // per-month series included.
+    let stale = create_memo(move |_| outcome.with(|o| o.error().is_some()));
 
     // The visible message updates immediately; the announcement waits for a
     // pause. Each keystroke cancels the previous pending announcement, so a

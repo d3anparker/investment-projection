@@ -5,34 +5,21 @@ use crate::chart::{
     chart_svg, PLOT_BOTTOM_FRAC, PLOT_LEFT_FRAC, PLOT_TOP_FRAC, PLOT_WIDTH_FRAC,
 };
 use crate::format::{fmt_money, fmt_pct, horizon_label, month_label};
+use crate::panel::stale_body;
 use calc::CalcOutput;
 use leptos::*;
 
-/// The "Breakdown" panel body: same last-good/`.stale` contract as
-/// [`crate::summary::SummaryPanel`], wrapping the chart + table. Results are
-/// held through a transient error rather than blanked; the placeholder shows
-/// only when the form is genuinely empty.
+/// The "Breakdown" panel: [`results_view`]'s chart and table inside
+/// [`stale_body`]'s shell, or [`empty_view`] when there is nothing to project.
 #[component]
 pub fn ResultsPanel(
     #[prop(into)] displayed: Signal<Option<CalcOutput>>,
     #[prop(into)] stale: Signal<bool>,
 ) -> impl IntoView {
-    move || {
-        let is_stale = stale.get();
-        match displayed.get() {
-            Some(out) => view! {
-                <div class="results-body" class:stale=is_stale
-                     aria-busy=move || is_stale.then_some("true")>
-                    {results_view(out)}
-                </div>
-            }
-            .into_view(),
-            None => empty_view().into_view(),
-        }
-    }
+    stale_body(displayed, stale, results_view, empty_view)
 }
 
-fn results_view(out: CalcOutput) -> impl IntoView {
+fn results_view(out: &CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months;
     let svg = chart_svg(&out.series, &out.contributions_series);
     let has_contributions = !out.contributed_total.is_zero();

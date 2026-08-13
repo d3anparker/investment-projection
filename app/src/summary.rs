@@ -2,39 +2,26 @@
 //! the placeholder shown when the form is genuinely empty.
 
 use crate::format::{fmt_money, fmt_pct, fmt_signed_money, horizon_label};
+use crate::panel::stale_body;
 use calc::CalcOutput;
 use leptos::*;
 
-/// The "Projection" panel body. Takes the reactive `displayed` projection (the
-/// last *good* `CalcOutput`, held through a transient error) and a `stale` flag;
-/// it renders the stat cards dimmed via `.stale`/`aria-busy` when the current
-/// input is mid-error, and the placeholder only when the form is genuinely
-/// empty. Owning this wrapper here keeps `App` to layout.
+/// The "Projection" panel: [`summary_view`]'s stat cards inside [`stale_body`]'s
+/// shell, or [`empty_summary_view`] when there is nothing to project. Being a
+/// component of its own is what leaves `App` as layout.
 #[component]
 pub fn SummaryPanel(
     #[prop(into)] displayed: Signal<Option<CalcOutput>>,
     #[prop(into)] stale: Signal<bool>,
 ) -> impl IntoView {
-    move || {
-        let is_stale = stale.get();
-        match displayed.get() {
-            Some(out) => view! {
-                <div class="results-body" class:stale=is_stale
-                     aria-busy=move || is_stale.then_some("true")>
-                    {summary_view(out)}
-                </div>
-            }
-            .into_view(),
-            None => empty_summary_view().into_view(),
-        }
-    }
+    stale_body(displayed, stale, summary_view, empty_summary_view)
 }
 
 /// The headline figures. Rendered in its own full-width panel above the two
 /// columns: these are the answer the user came for, and hoisting them out also
 /// closes most of the dead space that a short form column left beside a tall
 /// results column.
-fn summary_view(out: CalcOutput) -> impl IntoView {
+fn summary_view(out: &CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months;
     let gain = !out.growth.is_sign_negative();
     let growth_color = format!("color: var({})", if gain { "--good" } else { "--bad" });
