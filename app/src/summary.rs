@@ -5,11 +5,36 @@ use crate::format::{fmt_money, fmt_pct, fmt_signed_money, horizon_label};
 use calc::CalcOutput;
 use leptos::*;
 
+/// The "Projection" panel body. Takes the reactive `displayed` projection (the
+/// last *good* `CalcOutput`, held through a transient error) and a `stale` flag;
+/// it renders the stat cards dimmed via `.stale`/`aria-busy` when the current
+/// input is mid-error, and the placeholder only when the form is genuinely
+/// empty. Owning this wrapper here keeps `App` to layout.
+#[component]
+pub fn SummaryPanel(
+    #[prop(into)] displayed: Signal<Option<CalcOutput>>,
+    #[prop(into)] stale: Signal<bool>,
+) -> impl IntoView {
+    move || {
+        let is_stale = stale.get();
+        match displayed.get() {
+            Some(out) => view! {
+                <div class="results-body" class:stale=is_stale
+                     aria-busy=move || is_stale.then_some("true")>
+                    {summary_view(out)}
+                </div>
+            }
+            .into_view(),
+            None => empty_summary_view().into_view(),
+        }
+    }
+}
+
 /// The headline figures. Rendered in its own full-width panel above the two
 /// columns: these are the answer the user came for, and hoisting them out also
 /// closes most of the dead space that a short form column left beside a tall
 /// results column.
-pub fn summary_view(out: CalcOutput) -> impl IntoView {
+fn summary_view(out: CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months;
     let gain = !out.growth.is_sign_negative();
     let growth_color = format!("color: var({})", if gain { "--good" } else { "--bad" });
@@ -63,7 +88,7 @@ pub fn summary_view(out: CalcOutput) -> impl IntoView {
 /// Placeholder stats, shown only when the form is genuinely empty. A transient
 /// typo keeps the last good figures instead (see `displayed` in `main`), so
 /// reaching this state really does mean there is nothing to project.
-pub fn empty_summary_view() -> impl IntoView {
+fn empty_summary_view() -> impl IntoView {
     let stat = |label: &'static str, accent: bool| {
         view! {
             <div class="stat" class:stat-accent=accent>

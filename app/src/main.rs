@@ -30,8 +30,8 @@ use leptos::leptos_dom::helpers::TimeoutHandle;
 use leptos::*;
 use model::{bind_value, new_row, remove_label, remove_row};
 use outcome::{invalid_attrs, Outcome, ANNOUNCE_DELAY, ERROR_ID};
-use results::{empty_view, results_view};
-use summary::{empty_summary_view, summary_view};
+use results::ResultsPanel;
+use summary::SummaryPanel;
 
 fn main() {
     console_error_panic_hook::set_once();
@@ -85,6 +85,11 @@ fn App() -> impl IntoView {
         }
     });
 
+    // True while the current input is mid-error, so `displayed` is holding the
+    // last good projection rather than a current one. Both output panels dim
+    // themselves (`.stale`/`aria-busy`) on it.
+    let stale = Signal::derive(move || outcome.get().error().is_some());
+
     // The visible message updates immediately; the announcement waits for a
     // pause. Each keystroke cancels the previous pending announcement, so a
     // screen reader hears one settled message instead of a running commentary.
@@ -128,18 +133,7 @@ fn App() -> impl IntoView {
             <main class="layout">
                 <section class="panel panel-summary" aria-labelledby="projection-h">
                     <h2 id="projection-h">"Projection"</h2>
-                    {move || {
-                        let stale = outcome.get().error().is_some();
-                        match displayed.get() {
-                            Some(out) => view! {
-                                <div class="results-body" class:stale=stale
-                                     aria-busy=move || stale.then_some("true")>
-                                    {summary_view(out)}
-                                </div>
-                            }.into_view(),
-                            None => empty_summary_view().into_view(),
-                        }
-                    }}
+                    <SummaryPanel displayed=displayed stale=stale/>
                 </section>
 
                 <section class="panel">
@@ -269,20 +263,7 @@ fn App() -> impl IntoView {
 
                 <section class="panel results">
                     <h2>"Breakdown"</h2>
-                    {move || {
-                        let stale = outcome.get().error().is_some();
-                        match displayed.get() {
-                            // Results are held through a transient error rather
-                            // than blanked; `.stale` marks them as not current.
-                            Some(out) => view! {
-                                <div class="results-body" class:stale=stale
-                                     aria-busy=move || stale.then_some("true")>
-                                    {results_view(out)}
-                                </div>
-                            }.into_view(),
-                            None => empty_view().into_view(),
-                        }
-                    }}
+                    <ResultsPanel displayed=displayed stale=stale/>
                 </section>
             </main>
 

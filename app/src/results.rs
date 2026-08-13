@@ -8,7 +8,31 @@ use crate::format::{fmt_money, fmt_pct, horizon_label, month_label};
 use calc::CalcOutput;
 use leptos::*;
 
-pub fn results_view(out: CalcOutput) -> impl IntoView {
+/// The "Breakdown" panel body: same last-good/`.stale` contract as
+/// [`crate::summary::SummaryPanel`], wrapping the chart + table. Results are
+/// held through a transient error rather than blanked; the placeholder shows
+/// only when the form is genuinely empty.
+#[component]
+pub fn ResultsPanel(
+    #[prop(into)] displayed: Signal<Option<CalcOutput>>,
+    #[prop(into)] stale: Signal<bool>,
+) -> impl IntoView {
+    move || {
+        let is_stale = stale.get();
+        match displayed.get() {
+            Some(out) => view! {
+                <div class="results-body" class:stale=is_stale
+                     aria-busy=move || is_stale.then_some("true")>
+                    {results_view(out)}
+                </div>
+            }
+            .into_view(),
+            None => empty_view().into_view(),
+        }
+    }
+}
+
+fn results_view(out: CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months;
     let svg = chart_svg(&out.series, &out.contributions_series);
     let has_contributions = !out.contributed_total.is_zero();
@@ -199,7 +223,7 @@ pub fn results_view(out: CalcOutput) -> impl IntoView {
     }
 }
 
-pub fn empty_view() -> impl IntoView {
+fn empty_view() -> impl IntoView {
     view! {
         <p class="chart-placeholder">
             "Enter an investment to see the projection."
