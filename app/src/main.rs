@@ -106,7 +106,7 @@ fn App() -> impl IntoView {
         if let Some(Some(handle)) = prev {
             handle.clear();
         }
-        let msg = outcome.get().message().unwrap_or_default();
+        let msg = outcome.with(|o| o.message()).unwrap_or_default();
         set_timeout_with_handle(move || announced.set(msg), ANNOUNCE_DELAY).ok()
     });
 
@@ -118,6 +118,9 @@ fn App() -> impl IntoView {
         rows.update(|v| v.push(row));
     };
     let horizon_ref = bind_value(horizon_value);
+    // As with the row controls: one read of `outcome`, borrowed, shared by the
+    // three attributes the horizon input's error state drives.
+    let horizon_bad = create_memo(move |_| outcome.with(|o| o.flags_horizon()));
 
     view! {
         <div class="wrap">
@@ -163,6 +166,18 @@ fn App() -> impl IntoView {
                             let rate_ref = bind_value(r.rate);
                             // `node_ref` takes a plain binding, not a field access.
                             let remove_ref = r.remove_btn;
+                            // One memo per control. The three attributes each
+                            // drives (`aria-invalid`, `aria-describedby` and
+                            // `.field-invalid`) are separate closures, so they
+                            // would otherwise read `outcome` three times over —
+                            // and `get` clones the whole projection, both
+                            // per-month series included, to test one bool.
+                            let flagged = |part: InvestmentField| {
+                                create_memo(move |_| outcome.with(|o| o.flags(r.id, part)))
+                            };
+                            let value_bad = flagged(InvestmentField::Value);
+                            let contribution_bad = flagged(InvestmentField::Contribution);
+                            let rate_bad = flagged(InvestmentField::Rate);
                             view! {
                             <div class="inv-row">
                                 <label class="fld">
@@ -179,9 +194,9 @@ fn App() -> impl IntoView {
                                             type="text" inputmode="decimal"
                                             placeholder="10000"
                                             node_ref=value_ref
-                                            aria-invalid=move || invalid_attrs(outcome.get().flags(r.id, InvestmentField::Value)).0
-                                            aria-describedby=move || invalid_attrs(outcome.get().flags(r.id, InvestmentField::Value)).1
-                                            class:field-invalid=move || outcome.get().flags(r.id, InvestmentField::Value)
+                                            aria-invalid=move || invalid_attrs(value_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(value_bad.get()).1
+                                            class:field-invalid=move || value_bad.get()
                                             on:input=move |ev| r.value.set(event_target_value(&ev)) />
                                     </span>
                                 </label>
@@ -192,9 +207,9 @@ fn App() -> impl IntoView {
                                             type="text" inputmode="decimal"
                                             placeholder="100"
                                             node_ref=contribution_ref
-                                            aria-invalid=move || invalid_attrs(outcome.get().flags(r.id, InvestmentField::Contribution)).0
-                                            aria-describedby=move || invalid_attrs(outcome.get().flags(r.id, InvestmentField::Contribution)).1
-                                            class:field-invalid=move || outcome.get().flags(r.id, InvestmentField::Contribution)
+                                            aria-invalid=move || invalid_attrs(contribution_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(contribution_bad.get()).1
+                                            class:field-invalid=move || contribution_bad.get()
                                             on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
                                     </span>
                                 </label>
@@ -207,9 +222,9 @@ fn App() -> impl IntoView {
                                                 placeholder="7"
                                                 aria-label="Return percentage"
                                                 node_ref=rate_ref
-                                                aria-invalid=move || invalid_attrs(outcome.get().flags(r.id, InvestmentField::Rate)).0
-                                                aria-describedby=move || invalid_attrs(outcome.get().flags(r.id, InvestmentField::Rate)).1
-                                                class:field-invalid=move || outcome.get().flags(r.id, InvestmentField::Rate)
+                                                aria-invalid=move || invalid_attrs(rate_bad.get()).0
+                                                aria-describedby=move || invalid_attrs(rate_bad.get()).1
+                                                class:field-invalid=move || rate_bad.get()
                                                 on:input=move |ev| r.rate.set(event_target_value(&ev)) />
                                         </span>
                                         <select
@@ -244,9 +259,9 @@ fn App() -> impl IntoView {
                         <input
                             id="horizon-value" type="number" min="1" step="1" inputmode="numeric"
                             node_ref=horizon_ref
-                            aria-invalid=move || invalid_attrs(outcome.get().flags_horizon()).0
-                            aria-describedby=move || invalid_attrs(outcome.get().flags_horizon()).1
-                            class:field-invalid=move || outcome.get().flags_horizon()
+                            aria-invalid=move || invalid_attrs(horizon_bad.get()).0
+                            aria-describedby=move || invalid_attrs(horizon_bad.get()).1
+                            class:field-invalid=move || horizon_bad.get()
                             on:input=move |ev| horizon_value.set(event_target_value(&ev)) />
                         <select
                             aria-label="Projection unit"
@@ -260,7 +275,7 @@ fn App() -> impl IntoView {
                     // Visible immediately and not itself a live region: the
                     // invalid control points here via `aria-describedby`, so
                     // this text is read out with the field it belongs to.
-                    {move || outcome.get().message().map(|msg| view! {
+                    {move || outcome.with(|o| o.message()).map(|msg| view! {
                         <p class="error-msg" id=ERROR_ID>{msg}</p>
                     })}
 
