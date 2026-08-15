@@ -23,6 +23,10 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months;
     let svg = chart_svg(&out.series, &out.contributions_series);
     let has_contributions = !out.contributed_total.is_zero();
+    let has_withdrawals = !out.withdrawn_total.is_zero();
+    // Only grow the table with a "Runs dry" column if some holding actually
+    // empties — a percentage draw that merely shrinks the pot never does.
+    let any_depletion = out.investments.iter().any(|r| r.depletion_month.is_some());
 
     // --- scrub state -------------------------------------------------------
     // The chart plotted 121 points but only ever reported two of them, so
@@ -125,13 +129,30 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                 };
                 view! { <td class="num">{cell}</td> }
             });
+            let withdrawn = has_withdrawals.then(|| {
+                let cell = if r.withdrawn.is_zero() {
+                    "\u{2014}".to_string()
+                } else {
+                    fmt_money(r.withdrawn)
+                };
+                view! { <td class="num">{cell}</td> }
+            });
+            let runs_dry = any_depletion.then(|| {
+                let cell = match r.depletion_month {
+                    Some(m) => month_label(m),
+                    None => "\u{2014}".to_string(),
+                };
+                view! { <td class="num">{cell}</td> }
+            });
             view! {
                 <tr>
                     <td>{r.name.clone()}</td>
                     <td class="num">{fmt_money(r.current_value)}</td>
                     {contributed}
+                    {withdrawn}
                     <td class="num">{fmt_pct(r.annualised)}</td>
                     <td class="num">{fmt_money(r.projected_value)}</td>
+                    {runs_dry}
                 </tr>
             }
         })
@@ -200,8 +221,14 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                         {has_contributions.then(|| view! {
                             <th scope="col">{format!("Top-ups over {}", horizon_label(horizon))}</th>
                         })}
+                        {has_withdrawals.then(|| view! {
+                            <th scope="col">{format!("Taken out over {}", horizon_label(horizon))}</th>
+                        })}
                         <th scope="col">"Annualised"</th>
                         <th scope="col">"Projected"</th>
+                        {any_depletion.then(|| view! {
+                            <th scope="col">"Runs dry"</th>
+                        })}
                     </tr>
                 </thead>
                 <tbody>{breakdown}</tbody>

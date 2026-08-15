@@ -83,6 +83,7 @@ mod tests {
                 mode: Mode::Annual,
                 rate: "7".into(),
                 contribution: "0".into(),
+                flow: calc::Flow::Deposit,
             }],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,

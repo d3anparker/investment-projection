@@ -28,6 +28,23 @@ pub enum Mode {
     Annual,
 }
 
+/// What a row's monthly `contribution` figure *means* — the direction of the
+/// cash flow, and (for a withdrawal) whether it is a cash amount or a percentage
+/// of the running balance. The magnitude always arrives as a non-negative number
+/// in `contribution`; this enum supplies the sign and the interpretation.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Flow {
+    /// A monthly deposit of a fixed cash amount (the classic top-up).
+    #[default]
+    Deposit,
+    /// A monthly withdrawal of a fixed cash amount, capped at the balance
+    /// available that month (you cannot draw more than the pot holds).
+    Withdraw,
+    /// A monthly withdrawal of a percentage of the holding's current balance,
+    /// so the cash drawn shrinks with the pot. `contribution` is the percentage.
+    WithdrawPercent,
+}
+
 /// One investment as entered in the UI. Numbers arrive as strings (exactly as
 /// typed) and are parsed here, so parsing and validation live in one place.
 #[derive(Clone)]
@@ -38,9 +55,14 @@ pub struct InvestmentInput {
     pub value: String,
     pub mode: Mode,
     pub rate: String,
-    /// Optional recurring amount added to this holding every month going
-    /// forward (an ongoing monthly investment). Blank/`"0"` means none.
+    /// The magnitude of the recurring monthly cash flow, as a non-negative
+    /// number (blank/`"0"` means none). [`Flow`] decides what it means: a
+    /// deposit, a fixed withdrawal, or — for [`Flow::WithdrawPercent`] — a
+    /// percentage of the running balance rather than a cash amount.
     pub contribution: String,
+    /// The direction and interpretation of `contribution`. Defaults to
+    /// [`Flow::Deposit`], so an input built without it behaves as before.
+    pub flow: Flow,
 }
 
 #[derive(Clone)]
@@ -104,6 +126,15 @@ pub struct InvestmentResult {
     /// row so `projected_value` reconciles: without it a holding with top-ups
     /// looks like `current_value` grew at `annualised`, which it did not.
     pub contributed: Decimal,
+    /// Total actually withdrawn from this holding over the horizon (a positive
+    /// figure). Capped at what the pot held each month, so once it runs dry no
+    /// further withdrawal is counted. Reported for the same reconciliation
+    /// reason as `contributed`.
+    pub withdrawn: Decimal,
+    /// The month this holding first hit £0 through withdrawals, if it did within
+    /// the horizon. `None` when it never empties (no withdrawals, or the balance
+    /// outlasts the horizon, or a percentage draw that only ever shrinks it).
+    pub depletion_month: Option<u32>,
     pub projected_value: Decimal,
 }
 
@@ -119,9 +150,18 @@ pub struct CalcOutput {
     pub current_total: Decimal,
     /// Total of all future monthly contributions added over the horizon.
     pub contributed_total: Decimal,
+    /// Total withdrawn across every holding over the horizon (a positive figure),
+    /// each holding's draw capped at its balance. Zero when nothing is withdrawn.
+    pub withdrawn_total: Decimal,
+    /// The month the *whole portfolio* first reached £0, if every holding ran dry
+    /// within the horizon. `None` unless the combined total actually hits zero —
+    /// a portfolio with any growing holding never does.
+    pub depletion_month: Option<u32>,
     pub projected_total: Decimal,
     /// Projected investment gain: the final value less today's value *and* less
-    /// the money you contribute along the way, so it reflects returns only.
+    /// the *net* cash you moved in along the way (deposits minus withdrawals), so
+    /// it reflects returns only. Withdrawals are added back — money you took out
+    /// is not an investment loss.
     pub growth: Decimal,
     /// `growth` as a fraction of the capital deployed (today's value plus total
     /// contributions). A simple return on capital, not an IRR.
@@ -168,6 +208,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     // Cumulative contributions deposited by each month, parallel to `totals`.
     let mut contribs: Vec<Decimal> = vec![Decimal::ZERO; horizon + 1];
     let mut contributed_total = Decimal::ZERO;
+    let mut withdrawn_total = Decimal::ZERO;
 
     for (index, inv) in input.investments.iter().enumerate() {
         use InvestmentField::{Contribution, Rate, Value};
@@ -193,9 +234,12 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
                 Contribution,
             )
         })?;
+        // The magnitude is always non-negative; direction is carried by `flow`,
+        // not by a sign in this field (a withdrawal is picked, not typed as a
+        // negative). So a negative here is a genuine input error either way.
         if contribution < Decimal::ZERO {
             return Err(CalcError::at(
-                format!("'{}' has a negative monthly contribution.", inv.name),
+                format!("'{}' has a negative monthly amount.", inv.name),
                 index,
                 Contribution,
             ));
@@ -239,11 +283,17 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             .checked_powd(Decimal::ONE / twelve)
             .ok_or_else(|| too_large(Rate))?;
 
+        let is_percent = inv.flow == Flow::WithdrawPercent;
+        let withdrawing = matches!(inv.flow, Flow::Withdraw | Flow::WithdrawPercent);
+
         let mut value = current_value;
         let mut projected = current_value;
-        // Contributions this holding has deposited by the current month (none at
-        // month 0; one more added at each month end below).
+        // Deposits this holding has made and withdrawals it has taken by the
+        // current month (none at month 0; one more applied at each month end).
         let mut inv_contributed = Decimal::ZERO;
+        let mut inv_withdrawn = Decimal::ZERO;
+        // The month this holding first empties, recorded once.
+        let mut depletion_month: Option<u32> = None;
         for (i, month) in totals.iter_mut().enumerate() {
             *month = month
                 .checked_add(value)
@@ -254,20 +304,51 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             if i == horizon {
                 projected = value;
             } else {
-                // Advance one month: compound the running value, then add this
-                // month's contribution at month end. Skip past the horizon so a
+                // Advance one month: compound the running value, then apply this
+                // month's cash flow at month end. Skip past the horizon so a
                 // value we never use can't spuriously overflow at the endpoint.
-                value = value
+                let grown = value
                     .checked_mul(monthly)
-                    .ok_or_else(|| too_large(Rate))?
-                    .checked_add(contribution)
-                    .ok_or_else(|| too_large(Contribution))?;
-                inv_contributed = inv_contributed
-                    .checked_add(contribution)
-                    .ok_or_else(|| too_large(Contribution))?;
-                contributed_total = contributed_total
-                    .checked_add(contribution)
-                    .ok_or_else(|| too_large(Contribution))?;
+                    .ok_or_else(|| too_large(Rate))?;
+                if withdrawing {
+                    // Cash to draw this month: a fixed amount, or a percentage of
+                    // the grown balance. Capped at the balance — an empty pot
+                    // yields nothing further, and the shortfall simply isn't
+                    // withdrawn (so the running totals stay honest).
+                    let want = if is_percent {
+                        grown
+                            .checked_mul(contribution)
+                            .ok_or_else(|| too_large(Contribution))?
+                            / hundred
+                    } else {
+                        contribution
+                    };
+                    let avail = grown.max(Decimal::ZERO);
+                    let drawn = want.min(avail).max(Decimal::ZERO);
+                    value = grown
+                        .checked_sub(drawn)
+                        .ok_or_else(|| too_large(Contribution))?;
+                    inv_withdrawn = inv_withdrawn
+                        .checked_add(drawn)
+                        .ok_or_else(|| too_large(Contribution))?;
+                    withdrawn_total = withdrawn_total
+                        .checked_add(drawn)
+                        .ok_or_else(|| too_large(Contribution))?;
+                    // First month the pot runs dry (it held something before).
+                    if depletion_month.is_none() && value.is_zero() && avail > Decimal::ZERO {
+                        depletion_month = Some((i + 1) as u32);
+                    }
+                } else {
+                    value = grown
+                        .checked_add(contribution)
+                        .ok_or_else(|| too_large(Contribution))?;
+                    inv_contributed = inv_contributed
+                        .checked_add(contribution)
+                        .ok_or_else(|| too_large(Contribution))?;
+                    contributed_total = contributed_total
+                        .checked_add(contribution)
+                        .ok_or_else(|| too_large(Contribution))?;
+                }
             }
         }
 
@@ -276,6 +357,8 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             current_value: round2(current_value),
             annualised: annual,
             contributed: round2(inv_contributed),
+            withdrawn: round2(inv_withdrawn),
+            depletion_month,
             projected_value: round2(projected),
         });
     }
@@ -285,17 +368,34 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     let current_total = round2(*totals.first().expect("horizon >= 1 guarantees a point"));
     let projected_total = round2(*totals.last().expect("horizon >= 1 guarantees a point"));
     let contributed_total = round2(contributed_total);
-    // Gain from returns only: strip out both today's value and the money the
-    // user adds over the horizon. Percentage is measured against the capital
-    // actually deployed (today's value plus all contributions).
+    let withdrawn_total = round2(withdrawn_total);
+    // The whole portfolio "runs out" only when its combined total actually hits
+    // zero — i.e. every holding has run dry. Scan the *unrounded* totals, not the
+    // rounded `series`: a percentage drawdown shrinks the balance toward zero
+    // without reaching it, and a sub-penny total rounding to £0.00 must not read
+    // as depletion (the per-holding flag uses the exact value, so this keeps the
+    // two consistent). Skip the degenerate case of a portfolio that started at
+    // nothing; any holding still growing keeps the total above zero.
+    let depletion_month = if totals.first().is_some_and(|v| *v > Decimal::ZERO) {
+        totals.iter().position(|v| v.is_zero()).map(|i| i as u32)
+    } else {
+        None
+    };
+    // Gain from returns only: strip out today's value and the *net* cash moved
+    // in (deposits minus withdrawals), so money you withdrew is not booked as an
+    // investment loss. Percentage is measured against the capital deployed
+    // (today's value plus deposits) — withdrawals don't change what was put in.
     //
     // Checked: each total is individually capped near the Decimal maximum by the
     // loop above, so the portfolio-summary subtraction can underflow past the
     // minimum and the addition can overflow the maximum. An unchecked `+`/`-`
     // would panic, so on overflow we return an error instead.
+    let net_contributed = contributed_total
+        .checked_sub(withdrawn_total)
+        .ok_or_else(|| CalcError::new(portfolio_too_large(), None))?;
     let growth = projected_total
         .checked_sub(current_total)
-        .and_then(|g| g.checked_sub(contributed_total))
+        .and_then(|g| g.checked_sub(net_contributed))
         .ok_or_else(|| CalcError::new(portfolio_too_large(), None))?;
     let deployed = current_total
         .checked_add(contributed_total)
@@ -313,6 +413,8 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         horizon_months,
         current_total,
         contributed_total,
+        withdrawn_total,
+        depletion_month,
         projected_total,
         growth,
         growth_pct,
@@ -409,15 +511,20 @@ fn parse_target(target: &str) -> Result<Decimal, CalcError> {
 /// puts in — for a portfolio split that is the sum across holdings.
 fn projected_under(input: &CalcInput, scope: Scope, top_up: Decimal) -> Result<Decimal, CalcError> {
     let mut probe = input.clone();
+    // A top-up is a *deposit*, so force the flow even if the row is currently set
+    // to withdraw — otherwise the candidate amount would be drawn down instead of
+    // added, and the search could never reach the target.
     match scope {
         Scope::Holding(i) => {
             probe.investments[i].contribution = top_up.to_string();
+            probe.investments[i].flow = Flow::Deposit;
             Ok(calculate(&probe)?.investments[i].projected_value)
         }
         Scope::Portfolio => {
             let each = top_up / Decimal::from(probe.investments.len());
             for inv in &mut probe.investments {
                 inv.contribution = each.to_string();
+                inv.flow = Flow::Deposit;
             }
             Ok(calculate(&probe)?.projected_total)
         }
@@ -497,6 +604,9 @@ fn solve_time(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution,
         mode: Mode::Annual,
         rate: (res.annualised * Decimal::from(100u32)).to_string(),
         contribution: orig.contribution.clone(),
+        // Preserve the cash-flow direction, so a holding being drawn down keeps
+        // draining as time is projected forward rather than turning into a saver.
+        flow: orig.flow,
     };
 
     // The rows to project and today's value to compare against, per scope. A
@@ -650,6 +760,33 @@ mod tests {
                 mode,
                 rate: rate.into(),
                 contribution: contribution.into(),
+                flow: Flow::Deposit,
+            }],
+            horizon_value: horizon.into(),
+            horizon_unit: hunit,
+        }
+    }
+
+    /// A single holding with an explicit cash-flow direction, for the drawdown
+    /// tests. `amount` is the monthly magnitude (a cash figure, or a percentage
+    /// for [`Flow::WithdrawPercent`]).
+    fn with_flow(
+        value: &str,
+        mode: Mode,
+        rate: &str,
+        amount: &str,
+        flow: Flow,
+        horizon: &str,
+        hunit: Unit,
+    ) -> CalcInput {
+        CalcInput {
+            investments: vec![InvestmentInput {
+                name: "X".into(),
+                value: value.into(),
+                mode,
+                rate: rate.into(),
+                contribution: amount.into(),
+                flow,
             }],
             horizon_value: horizon.into(),
             horizon_unit: hunit,
@@ -810,9 +947,9 @@ mod tests {
         // The index must track the position in `investments`, not just report 0.
         let input = CalcInput {
             investments: vec![
-                InvestmentInput { name: "A".into(), value: "10000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into() },
-                InvestmentInput { name: "B".into(), value: "5000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into() },
-                InvestmentInput { name: "C".into(), value: "oops".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into() },
+                InvestmentInput { name: "A".into(), value: "10000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into(), flow: Flow::Deposit },
+                InvestmentInput { name: "B".into(), value: "5000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into(), flow: Flow::Deposit },
+                InvestmentInput { name: "C".into(), value: "oops".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into(), flow: Flow::Deposit },
             ],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
@@ -859,8 +996,8 @@ mod tests {
     fn portfolio_sums_across_investments() {
         let input = CalcInput {
             investments: vec![
-                InvestmentInput { name: "A".into(), value: "10000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into() },
-                InvestmentInput { name: "B".into(), value: "5000".into(), mode: Mode::Total, rate: "80".into(), contribution: "0".into() },
+                InvestmentInput { name: "A".into(), value: "10000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "0".into(), flow: Flow::Deposit },
+                InvestmentInput { name: "B".into(), value: "5000".into(), mode: Mode::Total, rate: "80".into(), contribution: "0".into(), flow: Flow::Deposit },
             ],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
@@ -912,8 +1049,8 @@ mod tests {
         // portfolio total across both rows.
         let input = CalcInput {
             investments: vec![
-                InvestmentInput { name: "A".into(), value: "10000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "200".into() },
-                InvestmentInput { name: "B".into(), value: "5000".into(), mode: Mode::Total, rate: "80".into(), contribution: "0".into() },
+                InvestmentInput { name: "A".into(), value: "10000".into(), mode: Mode::Annual, rate: "7".into(), contribution: "200".into(), flow: Flow::Deposit },
+                InvestmentInput { name: "B".into(), value: "5000".into(), mode: Mode::Total, rate: "80".into(), contribution: "0".into(), flow: Flow::Deposit },
             ],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
@@ -1012,12 +1149,121 @@ mod tests {
 
     #[test]
     fn negative_contribution_is_rejected() {
+        // The magnitude is always non-negative; a withdrawal is a `Flow`, not a
+        // typed-in minus sign, so a negative here is an error whatever the flow.
         assert!(calculate(&with_contribution(
             "1000", Mode::Annual, "5", "-50", "10", Unit::Years,
         ))
         .unwrap_err()
             .message
-        .contains("negative monthly contribution"));
+        .contains("negative monthly amount"));
+    }
+
+    // --- drawdown / withdrawals --------------------------------------------
+
+    #[test]
+    fn fixed_withdrawal_depletes_and_reports_the_month() {
+        // £1,200 at 0% return, drawing £100 a month, empties in exactly 12
+        // months. The value reaches £0 at month 12 and stays there.
+        let out = calculate(&with_flow(
+            "1200", Mode::Annual, "0", "100", Flow::Withdraw, "12", Unit::Months,
+        ))
+        .unwrap();
+        assert_eq!(out.investments[0].withdrawn, d("1200.00"));
+        assert_eq!(out.investments[0].depletion_month, Some(12));
+        assert_eq!(out.projected_total, d("0.00"));
+        // The whole portfolio is this one holding, so it runs dry too.
+        assert_eq!(out.depletion_month, Some(12));
+    }
+
+    #[test]
+    fn withdrawal_is_capped_at_the_available_balance() {
+        // £150 drawing £100/mo at 0%: month 1 leaves £50, month 2 can only take
+        // that £50 (not £100), so total withdrawn is £150, not £200.
+        let out = calculate(&with_flow(
+            "150", Mode::Annual, "0", "100", Flow::Withdraw, "12", Unit::Months,
+        ))
+        .unwrap();
+        assert_eq!(out.investments[0].withdrawn, d("150.00"));
+        assert_eq!(out.investments[0].depletion_month, Some(2));
+        assert_eq!(out.projected_total, d("0.00"));
+    }
+
+    #[test]
+    fn percentage_withdrawal_shrinks_but_never_depletes() {
+        // 10% of the balance each month at 0% return: 10000 -> 9000 -> 8100 ->
+        // 7290. Geometric decay never reaches zero, so no depletion month.
+        let out = calculate(&with_flow(
+            "10000", Mode::Annual, "0", "10", Flow::WithdrawPercent, "3", Unit::Months,
+        ))
+        .unwrap();
+        assert_eq!(out.projected_total, d("7290.00"));
+        assert_eq!(out.investments[0].withdrawn, d("2710.00"));
+        assert_eq!(out.investments[0].depletion_month, None);
+        assert_eq!(out.depletion_month, None);
+    }
+
+    #[test]
+    fn a_percentage_draw_rounding_to_zero_is_not_a_depletion() {
+        // 50% of the balance each month: by ~month 15 the value is under a penny
+        // (£100 * 0.5^15 ≈ £0.003), so the *rounded* series shows £0.00 even
+        // though the pot never truly empties. Neither the holding nor the
+        // portfolio may report a depletion from that rounding artefact.
+        let out = calculate(&with_flow(
+            "100", Mode::Annual, "0", "50", Flow::WithdrawPercent, "24", Unit::Months,
+        ))
+        .unwrap();
+        assert!(out.series.iter().any(|v| v.is_zero()), "series should round to 0.00");
+        assert_eq!(out.investments[0].depletion_month, None);
+        assert_eq!(out.depletion_month, None);
+    }
+
+    #[test]
+    fn growth_adds_back_withdrawals_and_reconciles() {
+        // With withdrawals the reconciliation identity must still hold exactly:
+        // projected = current + deposits - withdrawals + growth.
+        let out = calculate(&with_flow(
+            "10000", Mode::Annual, "7", "100", Flow::Withdraw, "5", Unit::Years,
+        ))
+        .unwrap();
+        assert!(out.withdrawn_total > Decimal::ZERO);
+        assert_eq!(
+            out.projected_total,
+            out.current_total + out.contributed_total - out.withdrawn_total + out.growth
+        );
+    }
+
+    #[test]
+    fn a_growing_holding_keeps_the_portfolio_from_depleting() {
+        // One holding drains to £0; another keeps growing. The *holding* runs dry
+        // but the *portfolio* total never hits zero, so only the per-holding
+        // depletion is reported.
+        let input = CalcInput {
+            investments: vec![
+                InvestmentInput {
+                    name: "Grower".into(),
+                    value: "10000".into(),
+                    mode: Mode::Annual,
+                    rate: "7".into(),
+                    contribution: "0".into(),
+                    flow: Flow::Deposit,
+                },
+                InvestmentInput {
+                    name: "Drain".into(),
+                    value: "1200".into(),
+                    mode: Mode::Annual,
+                    rate: "0".into(),
+                    contribution: "100".into(),
+                    flow: Flow::Withdraw,
+                },
+            ],
+            horizon_value: "12".into(),
+            horizon_unit: Unit::Months,
+        };
+        let out = calculate(&input).unwrap();
+        assert_eq!(out.investments[1].depletion_month, Some(12));
+        assert_eq!(out.depletion_month, None);
+        assert!(out.projected_total > Decimal::ZERO);
     }
 
     // --- solve: monthly top-up ---------------------------------------------
@@ -1106,6 +1352,7 @@ mod tests {
                 mode: Mode::Total,
                 rate: "80".into(), // 80% total over the 10-year horizon
                 contribution: "0".into(),
+                flow: Flow::Deposit,
             }],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
@@ -1119,6 +1366,7 @@ mod tests {
                 mode: Mode::Annual,
                 rate: annual.to_string(),
                 contribution: "0".into(),
+                flow: Flow::Deposit,
             }],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
@@ -1149,8 +1397,8 @@ mod tests {
     fn two_holdings() -> CalcInput {
         CalcInput {
             investments: vec![
-                InvestmentInput { name: "Small".into(), value: "1000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "0".into() },
-                InvestmentInput { name: "Large".into(), value: "500000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "0".into() },
+                InvestmentInput { name: "Small".into(), value: "1000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "0".into(), flow: Flow::Deposit },
+                InvestmentInput { name: "Large".into(), value: "500000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "0".into(), flow: Flow::Deposit },
             ],
             horizon_value: "120".into(),
             horizon_unit: Unit::Months,
@@ -1187,8 +1435,8 @@ mod tests {
         // irrelevant. £1,000 at 0% with £100/month reaches £2,200 at month 12.
         let input = CalcInput {
             investments: vec![
-                InvestmentInput { name: "Small".into(), value: "1000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "100".into() },
-                InvestmentInput { name: "Large".into(), value: "500000".into(), mode: Mode::Annual, rate: "5".into(), contribution: "0".into() },
+                InvestmentInput { name: "Small".into(), value: "1000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "100".into(), flow: Flow::Deposit },
+                InvestmentInput { name: "Large".into(), value: "500000".into(), mode: Mode::Annual, rate: "5".into(), contribution: "0".into(), flow: Flow::Deposit },
             ],
             horizon_value: "120".into(),
             horizon_unit: Unit::Months,

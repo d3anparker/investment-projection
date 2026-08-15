@@ -13,7 +13,7 @@
 //! `RowData` snapshots the reactive `Row` down to plain strings for exactly that
 //! reason.
 
-use calc::{CalcInput, InvestmentInput, Mode, Unit};
+use calc::{CalcInput, Flow, InvestmentInput, Mode, Unit};
 
 /// A plain-string snapshot of one editor row, decoupled from the reactive
 /// `Row`'s signals so the input-building logic can be tested without a runtime.
@@ -30,6 +30,11 @@ pub struct RowData {
     pub mode: String,
     pub rate: String,
     pub contribution: String,
+    /// The monthly cash-flow direction: `"deposit"`, `"withdraw"`, or
+    /// `"withdraw_pct"`. `#[serde(default)]` yields `""` for links made before
+    /// this field existed, which [`flow_from`] reads as the deposit default.
+    #[serde(default)]
+    pub flow: String,
 }
 
 /// Build the `calc` input from the current rows, dropping blank ones. Returns
@@ -64,6 +69,7 @@ pub fn build_input(
                 mode: mode_from(&r.mode),
                 rate: blank_zero(&r.rate),
                 contribution: blank_zero(&r.contribution),
+                flow: flow_from(&r.flow),
             })
         })
         .collect();
@@ -106,6 +112,17 @@ pub fn mode_from(s: &str) -> Mode {
     }
 }
 
+/// A row's cash-flow `<select>` value → `calc::Flow`. Anything other than the
+/// two withdrawal values (including a blank from a pre-`flow` shared link) is the
+/// deposit default, so old links and new blank rows behave exactly as before.
+pub fn flow_from(s: &str) -> Flow {
+    match s {
+        "withdraw" => Flow::Withdraw,
+        "withdraw_pct" => Flow::WithdrawPercent,
+        _ => Flow::Deposit,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,7 +135,18 @@ mod tests {
             mode: "annual".into(),
             rate: rate.into(),
             contribution: contribution.into(),
+            flow: "deposit".into(),
         }
+    }
+
+    #[test]
+    fn flow_from_defaults_to_deposit() {
+        assert!(flow_from("withdraw") == Flow::Withdraw);
+        assert!(flow_from("withdraw_pct") == Flow::WithdrawPercent);
+        // Blank (a pre-`flow` shared link) and anything unknown are deposits.
+        assert!(flow_from("") == Flow::Deposit);
+        assert!(flow_from("deposit") == Flow::Deposit);
+        assert!(flow_from("nonsense") == Flow::Deposit);
     }
 
     #[test]

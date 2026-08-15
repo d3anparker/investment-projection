@@ -61,6 +61,7 @@ fn snapshot(rows: RwSignal<Vec<model::Row>>) -> Vec<RowData> {
             mode: r.mode.get(),
             rate: r.rate.get(),
             contribution: r.contribution.get(),
+            flow: r.flow.get(),
         })
         .collect()
 }
@@ -132,7 +133,7 @@ fn App() -> impl IntoView {
         state
             .rows
             .iter()
-            .map(|r| new_row(counter, &r.name, &r.value, &r.mode, &r.rate, &r.contribution))
+            .map(|r| new_row(counter, &r.name, &r.value, &r.mode, &r.rate, &r.contribution, &r.flow))
             .collect::<Vec<_>>(),
     );
     let horizon_value = create_rw_signal(state.horizon_value);
@@ -283,7 +284,7 @@ fn App() -> impl IntoView {
     // sibling button left to step to.
     let add_btn = create_node_ref::<html::Button>();
     let add_row = move |_| {
-        let row = new_row(counter, "", "", "annual", "", "");
+        let row = new_row(counter, "", "", "annual", "", "", "deposit");
         rows.update(|v| v.push(row));
     };
     let horizon_ref = bind_value(horizon_value);
@@ -363,7 +364,7 @@ fn App() -> impl IntoView {
                         <div class="inv-head" aria-hidden="true">
                             <span>"Name"</span>
                             <span>"Value today"</span>
-                            <span>"Monthly top-up"</span>
+                            <span>"Monthly top-up / withdrawal"</span>
                             <span>"Return figure"</span>
                             <span></span>
                         </div>
@@ -410,19 +411,35 @@ fn App() -> impl IntoView {
                                             on:input=move |ev| r.value.set(event_target_value(&ev)) />
                                     </span>
                                 </label>
-                                <label class="fld">
-                                    <span class="fld-lbl">"Monthly top-up"</span>
-                                    <span class="adorn adorn-money">
-                                        <input
-                                            type="text" inputmode="decimal"
-                                            placeholder="100"
-                                            node_ref=contribution_ref
-                                            aria-invalid=move || invalid_attrs(contribution_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(contribution_bad.get()).1
-                                            class:field-invalid=move || contribution_bad.get()
-                                            on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
-                                    </span>
-                                </label>
+                                <div class="fld fld-flow">
+                                    <span class="fld-lbl">"Monthly top-up / withdrawal"</span>
+                                    <div class="flow-control">
+                                        // £ for a cash amount, % for a
+                                        // percentage draw — switched with the
+                                        // flow so the adornment matches what the
+                                        // number means.
+                                        <span class="adorn"
+                                              class:adorn-money=move || r.flow.get() != "withdraw_pct"
+                                              class:adorn-pct=move || r.flow.get() == "withdraw_pct">
+                                            <input
+                                                type="text" inputmode="decimal"
+                                                placeholder="100"
+                                                node_ref=contribution_ref
+                                                aria-label="Monthly amount"
+                                                aria-invalid=move || invalid_attrs(contribution_bad.get()).0
+                                                aria-describedby=move || invalid_attrs(contribution_bad.get()).1
+                                                class:field-invalid=move || contribution_bad.get()
+                                                on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
+                                        </span>
+                                        <select
+                                            aria-label="Whether the monthly amount is paid in, taken out, or a percentage taken out"
+                                            on:change=move |ev| r.flow.set(event_target_value(&ev))>
+                                            <option value="deposit" selected=move || r.flow.get() != "withdraw" && r.flow.get() != "withdraw_pct">"in"</option>
+                                            <option value="withdraw" selected=move || r.flow.get() == "withdraw">"out"</option>
+                                            <option value="withdraw_pct" selected=move || r.flow.get() == "withdraw_pct">"% out"</option>
+                                        </select>
+                                    </div>
+                                </div>
                                 <div class="fld fld-return">
                                     <span class="fld-lbl">"Return figure"</span>
                                     <div class="return-control">

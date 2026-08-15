@@ -66,6 +66,7 @@ impl ShareState {
             mode: mode.into(),
             rate: rate.into(),
             contribution: contribution.into(),
+            flow: "deposit".into(),
         };
         ShareState {
             rows: vec![
@@ -157,7 +158,15 @@ pub fn decode(fragment: &str) -> Option<ShareState> {
 mod tests {
     use super::*;
 
-    fn row(id: usize, name: &str, value: &str, mode: &str, rate: &str, contribution: &str) -> RowData {
+    fn row(
+        id: usize,
+        name: &str,
+        value: &str,
+        mode: &str,
+        rate: &str,
+        contribution: &str,
+        flow: &str,
+    ) -> RowData {
         RowData {
             id,
             name: name.into(),
@@ -165,14 +174,16 @@ mod tests {
             mode: mode.into(),
             rate: rate.into(),
             contribution: contribution.into(),
+            flow: flow.into(),
         }
     }
 
     fn sample() -> ShareState {
         ShareState {
             rows: vec![
-                row(0, "Global Equity Fund", "10000", "annual", "7", "200"),
-                row(1, "Government Bond Fund", "5000", "total", "80", "0"),
+                row(0, "Global Equity Fund", "10000", "annual", "7", "200", "deposit"),
+                // A withdrawal row so the round-trip exercises `flow`.
+                row(1, "Cash Drawdown", "5000", "annual", "2", "150", "withdraw"),
             ],
             horizon_value: "10".into(),
             horizon_unit: "years".into(),

@@ -1,7 +1,7 @@
 //! The full-width "Projection" summary panel: the four headline stat cards, and
 //! the placeholder shown when the form is genuinely empty.
 
-use crate::format::{fmt_money, fmt_pct, fmt_signed_money, horizon_label};
+use crate::format::{fmt_money, fmt_pct, fmt_signed_money, horizon_label, month_label};
 use crate::panel::stale_body;
 use calc::CalcOutput;
 use leptos::*;
@@ -37,7 +37,32 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
         }
     });
 
+    // Likewise, only show withdrawals when the portfolio is actually being drawn
+    // down, so a pure-saver projection is unchanged.
+    let withdrawals_stat = (!out.withdrawn_total.is_zero()).then(|| {
+        view! {
+            <div class="stat">
+                <span class="stat-label">{format!("Taken out over {}", horizon_label(horizon))}</span>
+                <span class="stat-value">{fmt_money(out.withdrawn_total)}</span>
+            </div>
+        }
+    });
+
+    // The headline of a drawdown: when the whole portfolio empties within the
+    // horizon, say so plainly. It is the point of the feature, so it sits above
+    // the stat cards rather than as one more number among them.
+    let depletion_note = out.depletion_month.map(|m| {
+        view! {
+            <p class="depletion-note" role="note">
+                <strong>{format!("Your money runs out in {}.", month_label(m))}</strong>
+                " Drawing it down empties the portfolio before the end of the projection; \
+                 after that point the value stays at \u{00a3}0."
+            </p>
+        }
+    });
+
     view! {
+        {depletion_note}
         <div class="summary">
             // The projection leads: it is the question the tool exists to answer,
             // and at the same size as its own inputs it did not read as one.
@@ -50,6 +75,7 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
                 <span class="stat-value">{fmt_money(out.current_total)}</span>
             </div>
             {contributions_stat}
+            {withdrawals_stat}
             <div class="stat">
                 // The label carries the direction too, so gain vs loss does not
                 // rest on green-vs-red alone.
