@@ -17,7 +17,13 @@ use calc::{CalcInput, InvestmentInput, Mode, Unit};
 
 /// A plain-string snapshot of one editor row, decoupled from the reactive
 /// `Row`'s signals so the input-building logic can be tested without a runtime.
+/// `Clone` so it can also carry a projection's form state into [`crate::share`].
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RowData {
+    // The id is positional bookkeeping for the reactive layer, not part of the
+    // shared state: the codec drops it on the way out and reassigns it by row
+    // position on the way back in, so it never bloats the link.
+    #[serde(skip)]
     pub id: usize,
     pub name: String,
     pub value: String,

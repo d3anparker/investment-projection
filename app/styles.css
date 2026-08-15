@@ -472,6 +472,59 @@ input[type="number"]::-webkit-inner-spin-button {
   width: auto;
 }
 
+/* The two form buttons (Add investment / Copy link) sit on one wrapping row. */
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* Copy-link confirmation. Reserves its line height so appearing/clearing the
+   message doesn't nudge the layout. Positive tone, so it uses --good. */
+.copy-status {
+  margin: 8px 0 0;
+  min-height: 1.15em;
+  font-size: 0.85rem;
+  color: var(--good);
+}
+
+/* "Reach a target" goal row: the same inline, wrapping layout and money
+   adornment as .horizon, one block below it at the foot of the form. No top
+   border of its own — two stacked rules would read as a heavy double divider. */
+.goal {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--muted);
+}
+
+.goal label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.goal .adorn-money input {
+  width: 120px;
+}
+
+.goal select {
+  width: auto;
+}
+
+/* The goal answer, in the summary panel below the stat cards. Tinted with the
+   accent so it reads as an answer, not an error (which uses the --bad tint). */
+.goal-result {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
 .error-msg {
   margin: 16px 0 0;
   padding: 10px 12px;

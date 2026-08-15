@@ -8,6 +8,7 @@
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
+use rust_decimal::RoundingStrategy;
 use std::str::FromStr;
 
 /// The unit a period value is expressed in.
@@ -29,6 +30,7 @@ pub enum Mode {
 
 /// One investment as entered in the UI. Numbers arrive as strings (exactly as
 /// typed) and are parsed here, so parsing and validation live in one place.
+#[derive(Clone)]
 pub struct InvestmentInput {
     pub name: String,
     /// Today's value of the whole holding (principal plus any historical
@@ -41,6 +43,7 @@ pub struct InvestmentInput {
     pub contribution: String,
 }
 
+#[derive(Clone)]
 pub struct CalcInput {
     pub investments: Vec<InvestmentInput>,
     pub horizon_value: String,
@@ -317,6 +320,250 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     })
 }
 
+/// What a goal is measured against — and, for a top-up, where the money goes:
+/// the whole portfolio, or a single holding by index into
+/// [`CalcInput::investments`]. The UI's picker chooses this, so *both* goal kinds
+/// mean one consistent thing by it: "the value we are tracking toward the
+/// target". A `Holding` goal is answered in isolation from the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// The combined portfolio total. For a top-up, the candidate amount is split
+    /// evenly across every holding.
+    Portfolio,
+    /// One holding (by index), tracked on its own. For a top-up, the amount goes
+    /// entirely onto this holding and success is measured against it alone.
+    Holding(usize),
+}
+
+/// What to solve the projection *for*. Each carries the user's target value as a
+/// raw string, parsed here the same way [`calculate`] parses inputs, and the
+/// [`Scope`] that value is measured against.
+pub enum Goal {
+    /// Solve for the recurring monthly top-up that makes `scope` reach `target`.
+    MonthlyTopUp { target: String, scope: Scope },
+    /// Solve for the time, in whole months, until `scope` first reaches `target`,
+    /// holding the currently-projected annual rates fixed.
+    TimeToTarget { target: String, scope: Scope },
+}
+
+/// The answer to a [`Goal`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Solution {
+    /// The monthly top-up required, rounded up to the penny so it genuinely
+    /// reaches the target rather than landing a fraction short.
+    MonthlyTopUp(Decimal),
+    /// Whole months until the portfolio first reaches the target.
+    Months(u32),
+    /// The target is already met by the inputs as they stand — no top-up needed,
+    /// or the portfolio is already worth at least the target today.
+    AlreadyMet,
+}
+
+/// The largest monthly top-up the bracket search will consider before declaring
+/// a target unreachable. A billion a month is comfortably past any real use and
+/// keeps the doubling search bounded.
+const MAX_TOP_UP: i64 = 1_000_000_000;
+
+/// Solve the projection for a [`Goal`]. Shares [`calculate`]'s never-panic
+/// contract: invalid input and unreachable targets come back as `Err`, never a
+/// panic or a hang, and all arithmetic stays exact `Decimal`.
+pub fn solve(input: &CalcInput, goal: &Goal) -> Result<Solution, CalcError> {
+    match goal {
+        Goal::MonthlyTopUp { target, scope } => solve_top_up(input, target, *scope),
+        Goal::TimeToTarget { target, scope } => solve_time(input, target, *scope),
+    }
+}
+
+/// Guard a [`Scope`] against the current inputs before solving: a `Portfolio`
+/// scope needs at least one holding, a `Holding` scope a valid index. Both come
+/// back as portfolio-level errors (no `Field`), as the picker is not one of the
+/// row controls the user could mark invalid.
+fn validate_scope(input: &CalcInput, scope: Scope) -> Result<(), CalcError> {
+    match scope {
+        Scope::Portfolio if input.investments.is_empty() => {
+            Err(CalcError::new("Add a holding before solving a goal.", None))
+        }
+        Scope::Holding(i) if i >= input.investments.len() => {
+            Err(CalcError::new("Pick a holding to solve for.", None))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The target field of a goal is not one of the form's investment controls, so
+/// its errors carry no `Field` — they surface as a portfolio-level message.
+fn parse_target(target: &str) -> Result<Decimal, CalcError> {
+    let t = parse_number(target)
+        .ok_or_else(|| CalcError::new("Enter a valid target amount.", None))?;
+    if t < Decimal::ZERO {
+        return Err(CalcError::new("The target amount cannot be negative.", None));
+    }
+    Ok(t)
+}
+
+/// The value a candidate monthly top-up produces under `scope`: the chosen
+/// holding's projected value (the money added to that one holding), or the
+/// portfolio's projected total (the amount split evenly across every holding).
+/// Both rise monotonically with `top_up`, which is what lets the bracket search
+/// converge. The reported answer is always the *total* monthly figure the user
+/// puts in — for a portfolio split that is the sum across holdings.
+fn projected_under(input: &CalcInput, scope: Scope, top_up: Decimal) -> Result<Decimal, CalcError> {
+    let mut probe = input.clone();
+    match scope {
+        Scope::Holding(i) => {
+            probe.investments[i].contribution = top_up.to_string();
+            Ok(calculate(&probe)?.investments[i].projected_value)
+        }
+        Scope::Portfolio => {
+            let each = top_up / Decimal::from(probe.investments.len());
+            for inv in &mut probe.investments {
+                inv.contribution = each.to_string();
+            }
+            Ok(calculate(&probe)?.projected_total)
+        }
+    }
+}
+
+/// Bisection on the monthly top-up. `projected_under` rises monotonically with
+/// the top-up under either scope, so a doubling bracket plus binary search
+/// converges on the least top-up that makes `scope` reach the target.
+fn solve_top_up(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution, CalcError> {
+    let target = parse_target(target)?;
+    validate_scope(input, scope)?;
+
+    // Value reached for a given monthly top-up under the chosen scope.
+    let projected_with = |top_up: Decimal| projected_under(input, scope, top_up);
+
+    // Already there with no extra top-up? Then no contribution is needed.
+    if projected_with(Decimal::ZERO)? >= target {
+        return Ok(Solution::AlreadyMet);
+    }
+
+    // Bracket: double the upper bound until it reaches the target or hits the cap.
+    let cap = Decimal::from(MAX_TOP_UP);
+    let mut hi = Decimal::ONE;
+    while projected_with(hi)? < target {
+        hi *= Decimal::from(2u32);
+        if hi > cap {
+            return Err(CalcError::new(
+                format!(
+                    "No monthly top-up reaches {} in this time; extend the horizon or lower the target.",
+                    fmt_money_plain(target)
+                ),
+                None,
+            ));
+        }
+    }
+
+    // Bisect the [lo, hi] bracket to the penny.
+    let mut lo = Decimal::ZERO;
+    let cent = Decimal::new(1, 2); // 0.01
+    for _ in 0..80 {
+        if hi - lo <= cent {
+            break;
+        }
+        let mid = (lo + hi) / Decimal::from(2u32);
+        if projected_with(mid)? >= target {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    // Round *up* to the penny: the reported figure must actually reach the
+    // target, and rounding down could leave it a fraction short.
+    let answer = hi.round_dp_with_strategy(2, RoundingStrategy::AwayFromZero);
+    Ok(Solution::MonthlyTopUp(answer))
+}
+
+/// Time until `scope` reaches the target. Bisecting on the horizon itself is
+/// unsound: a `Mode::Total` row's rate is *defined relative to the horizon*, so
+/// lengthening it flattens that row and the value is not monotonic in time.
+/// Instead, freeze each row at the annual rate it is *currently* projected at
+/// (an exact round-trip of `InvestmentResult::annualised`), then project the
+/// scoped rows — the whole portfolio, or the one holding — out to the 100-year
+/// cap and scan the series.
+fn solve_time(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution, CalcError> {
+    let target = parse_target(target)?;
+    validate_scope(input, scope)?;
+    let base = calculate(input)?;
+
+    // Rebuild a row at the annual rate it currently projects at, so a
+    // `Mode::Total` row is frozen instead of re-spread over the new horizon;
+    // `annualised` is a growth fraction, ×100 back to a percent.
+    let frozen = |res: &InvestmentResult, orig: &InvestmentInput| InvestmentInput {
+        name: orig.name.clone(),
+        value: res.current_value.to_string(),
+        mode: Mode::Annual,
+        rate: (res.annualised * Decimal::from(100u32)).to_string(),
+        contribution: orig.contribution.clone(),
+    };
+
+    // The rows to project and today's value to compare against, per scope. A
+    // `Holding` scope drops every other row so the series is that holding alone.
+    let (investments, current) = match scope {
+        Scope::Portfolio => (
+            input
+                .investments
+                .iter()
+                .zip(base.investments.iter())
+                .map(|(orig, res)| frozen(res, orig))
+                .collect::<Vec<_>>(),
+            base.current_total,
+        ),
+        Scope::Holding(i) => (
+            vec![frozen(&base.investments[i], &input.investments[i])],
+            base.investments[i].current_value,
+        ),
+    };
+
+    if current >= target {
+        return Ok(Solution::AlreadyMet);
+    }
+
+    let long = CalcInput {
+        investments,
+        horizon_value: "1200".to_string(),
+        horizon_unit: Unit::Months,
+    };
+    let out = calculate(&long)?;
+
+    match out.series.iter().position(|v| *v >= target) {
+        Some(0) => Ok(Solution::AlreadyMet),
+        Some(i) => Ok(Solution::Months(i as u32)),
+        None => Err(CalcError::new(
+            format!(
+                "{} does not reach {} within 100 years; raise the returns or the contributions.",
+                match scope {
+                    Scope::Portfolio => "The portfolio",
+                    Scope::Holding(_) => "This holding",
+                },
+                fmt_money_plain(target)
+            ),
+            None,
+        )),
+    }
+}
+
+/// A grouped `£1,234.56` for embedding in error messages, matching the UI's
+/// `fmt_money`. Kept here (not in the UI `format` module) because `calc` owns
+/// its own message text; the small grouping loop is duplicated rather than
+/// crossing the crate boundary the other way.
+fn fmt_money_plain(d: Decimal) -> String {
+    let s = format!("{:.2}", d.round_dp(2).abs());
+    let (int, frac) = s.split_once('.').unwrap_or((s.as_str(), "00"));
+    let len = int.len();
+    let mut grouped = String::with_capacity(len + len / 3);
+    for (i, ch) in int.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    let sign = if d.is_sign_negative() { "-" } else { "" };
+    format!("{sign}\u{00a3}{grouped}.{frac}")
+}
+
 /// Convert a `value` + `unit` into whole months, doing the ×12 and the rounding
 /// of fractional periods entirely in `Decimal`. `field` names the input for
 /// error messages.
@@ -351,7 +598,7 @@ fn to_months(value: &str, unit: Unit, field: &str) -> Result<u32, String> {
 /// This only widens what is accepted; it never guesses. Anything that is not a
 /// plain decimal number once the noise is gone still fails. Note the en-GB
 /// assumption baked in: `,` is a thousands separator, not a decimal point.
-fn parse_number(s: &str) -> Option<Decimal> {
+pub fn parse_number(s: &str) -> Option<Decimal> {
     let cleaned: String = s
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, ',' | '_' | '\u{00a3}' | '$' | '\u{20ac}' | '%'))
@@ -771,5 +1018,193 @@ mod tests {
         .unwrap_err()
             .message
         .contains("negative monthly contribution"));
+    }
+
+    // --- solve: monthly top-up ---------------------------------------------
+
+    #[test]
+    fn top_up_solves_a_hand_checkable_case() {
+        // £0 today, 0% return, 120 months: £12,000 needs exactly £100/month.
+        let input = with_contribution("0", Mode::Annual, "0", "0", "120", Unit::Months);
+        let sol = solve(&input, &Goal::MonthlyTopUp { target: "12000".into(), scope: Scope::Holding(0) }).unwrap();
+        assert_eq!(sol, Solution::MonthlyTopUp(d("100.00")));
+    }
+
+    #[test]
+    fn top_up_answer_round_trips_and_a_penny_less_falls_short() {
+        // Non-zero rate: don't assert a magic number, assert the property that
+        // the reported top-up actually reaches the target and one cent less does not.
+        let input = with_contribution("5000", Mode::Annual, "6", "0", "15", Unit::Years);
+        let target = d("250000");
+        let Solution::MonthlyTopUp(top_up) =
+            solve(&input, &Goal::MonthlyTopUp { target: "250000".into(), scope: Scope::Holding(0) }).unwrap()
+        else {
+            panic!("expected a MonthlyTopUp solution");
+        };
+
+        let reached = |c: Decimal| {
+            let mut probe = input.clone();
+            probe.investments[0].contribution = c.to_string();
+            calculate(&probe).unwrap().projected_total
+        };
+        assert!(reached(top_up) >= target, "reported top-up must reach the target");
+        assert!(
+            reached(top_up - d("0.01")) < target,
+            "a penny less must fall short"
+        );
+    }
+
+    #[test]
+    fn top_up_reports_already_met_when_no_contribution_is_needed() {
+        // £100k today at 7% over 10 years clears a £150k target on its own.
+        let input = with_contribution("100000", Mode::Annual, "7", "0", "10", Unit::Years);
+        let sol = solve(&input, &Goal::MonthlyTopUp { target: "150000".into(), scope: Scope::Holding(0) }).unwrap();
+        assert_eq!(sol, Solution::AlreadyMet);
+    }
+
+    #[test]
+    fn top_up_target_out_of_range_errors_with_a_message() {
+        // Impossible: £1 today, 0% return, one month, target £1bn+.
+        let input = with_contribution("1", Mode::Annual, "0", "0", "1", Unit::Months);
+        let err = solve(
+            &input,
+            &Goal::MonthlyTopUp { target: "999999999999".into(), scope: Scope::Holding(0) },
+        )
+        .unwrap_err();
+        assert!(err.message.contains("No monthly top-up reaches"));
+        assert!(err.field.is_none());
+    }
+
+    #[test]
+    fn top_up_rejects_a_bad_target_and_out_of_range_index() {
+        let input = with_contribution("1000", Mode::Annual, "7", "0", "10", Unit::Years);
+        assert!(solve(&input, &Goal::MonthlyTopUp { target: "abc".into(), scope: Scope::Holding(0) }).is_err());
+        assert!(solve(&input, &Goal::MonthlyTopUp { target: "-5".into(), scope: Scope::Holding(0) }).is_err());
+        assert!(solve(&input, &Goal::MonthlyTopUp { target: "1000".into(), scope: Scope::Holding(9) }).is_err());
+    }
+
+    // --- solve: time to target ---------------------------------------------
+
+    #[test]
+    fn time_to_target_on_a_flat_contribution_case() {
+        // £0 today, 0% return, £100/month: £1,200 is first reached at month 12.
+        let input = with_contribution("0", Mode::Annual, "0", "100", "10", Unit::Years);
+        let sol = solve(&input, &Goal::TimeToTarget { target: "1200".into(), scope: Scope::Portfolio }).unwrap();
+        assert_eq!(sol, Solution::Months(12));
+    }
+
+    #[test]
+    fn time_to_target_matches_the_equivalent_annual_input() {
+        // The trap: solving for time can't just lengthen the horizon, because a
+        // Mode::Total row's rate is *defined relative to that horizon* and would
+        // re-spread. The guard is that solving on a Total-mode row gives the same
+        // answer as solving on the Annual-mode row it currently projects at.
+        let total = CalcInput {
+            investments: vec![InvestmentInput {
+                name: "T".into(),
+                value: "10000".into(),
+                mode: Mode::Total,
+                rate: "80".into(), // 80% total over the 10-year horizon
+                contribution: "0".into(),
+            }],
+            horizon_value: "10".into(),
+            horizon_unit: Unit::Years,
+        };
+        // The exact annual rate that 80%-total-over-10-years projects at.
+        let annual = (d("1.8").powd(Decimal::ONE / d("10")) - Decimal::ONE) * d("100");
+        let equiv = CalcInput {
+            investments: vec![InvestmentInput {
+                name: "A".into(),
+                value: "10000".into(),
+                mode: Mode::Annual,
+                rate: annual.to_string(),
+                contribution: "0".into(),
+            }],
+            horizon_value: "10".into(),
+            horizon_unit: Unit::Years,
+        };
+        let goal = Goal::TimeToTarget { target: "15000".into(), scope: Scope::Portfolio };
+        assert_eq!(solve(&total, &goal).unwrap(), solve(&equiv, &goal).unwrap());
+    }
+
+    #[test]
+    fn time_to_target_reports_already_met_when_value_today_clears_it() {
+        let input = with_contribution("50000", Mode::Annual, "7", "0", "10", Unit::Years);
+        let sol = solve(&input, &Goal::TimeToTarget { target: "40000".into(), scope: Scope::Portfolio }).unwrap();
+        assert_eq!(sol, Solution::AlreadyMet);
+    }
+
+    #[test]
+    fn time_to_target_that_is_never_reached_errors_not_hangs() {
+        // Flat portfolio (0% return, no top-ups) can never grow past its start.
+        let input = with_contribution("1000", Mode::Annual, "0", "0", "10", Unit::Years);
+        let err = solve(&input, &Goal::TimeToTarget { target: "5000".into(), scope: Scope::Portfolio }).unwrap_err();
+        assert!(err.message.contains("does not reach"));
+    }
+
+    // --- solve: scope (per-holding vs whole portfolio) ---------------------
+
+    /// A two-holding portfolio: a small holding to solve for and a large one that
+    /// would swamp it if the scope leaked to the portfolio total.
+    fn two_holdings() -> CalcInput {
+        CalcInput {
+            investments: vec![
+                InvestmentInput { name: "Small".into(), value: "1000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "0".into() },
+                InvestmentInput { name: "Large".into(), value: "500000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "0".into() },
+            ],
+            horizon_value: "120".into(),
+            horizon_unit: Unit::Months,
+        }
+    }
+
+    #[test]
+    fn top_up_on_a_holding_ignores_the_rest_of_the_portfolio() {
+        // Small holding: £1,000, 0%, 120 months. Reaching £13,000 needs £100/month
+        // on *this* holding — the £500k sibling must not make it already met.
+        let input = two_holdings();
+        let sol = solve(&input, &Goal::MonthlyTopUp { target: "13000".into(), scope: Scope::Holding(0) }).unwrap();
+        assert_eq!(sol, Solution::MonthlyTopUp(d("100.00")));
+    }
+
+    #[test]
+    fn top_up_on_the_portfolio_splits_evenly_and_reaches_the_total() {
+        // Portfolio £501,000 today, 0%, 120 months. Reaching £513,000 needs
+        // £12,000 more over 120 months = £100/month total, split across the two.
+        let input = two_holdings();
+        let Solution::MonthlyTopUp(total) =
+            solve(&input, &Goal::MonthlyTopUp { target: "513000".into(), scope: Scope::Portfolio }).unwrap()
+        else {
+            panic!("expected a MonthlyTopUp solution");
+        };
+        assert_eq!(total, d("100.00"));
+        // Property: the reported total, split evenly, actually reaches the target.
+        assert!(projected_under(&input, Scope::Portfolio, total).unwrap() >= d("513000"));
+    }
+
+    #[test]
+    fn time_on_a_holding_tracks_that_holding_alone() {
+        // Small holding grows at its own rate to the target; the large sibling is
+        // irrelevant. £1,000 at 0% with £100/month reaches £2,200 at month 12.
+        let input = CalcInput {
+            investments: vec![
+                InvestmentInput { name: "Small".into(), value: "1000".into(), mode: Mode::Annual, rate: "0".into(), contribution: "100".into() },
+                InvestmentInput { name: "Large".into(), value: "500000".into(), mode: Mode::Annual, rate: "5".into(), contribution: "0".into() },
+            ],
+            horizon_value: "120".into(),
+            horizon_unit: Unit::Months,
+        };
+        let sol = solve(&input, &Goal::TimeToTarget { target: "2200".into(), scope: Scope::Holding(0) }).unwrap();
+        assert_eq!(sol, Solution::Months(12));
+        // The same target is already met the instant we scope to the portfolio,
+        // whose total is over £500k today — proof the scope actually narrows.
+        let port = solve(&input, &Goal::TimeToTarget { target: "2200".into(), scope: Scope::Portfolio }).unwrap();
+        assert_eq!(port, Solution::AlreadyMet);
+    }
+
+    #[test]
+    fn a_portfolio_goal_needs_a_holding() {
+        let empty = CalcInput { investments: vec![], horizon_value: "10".into(), horizon_unit: Unit::Years };
+        assert!(solve(&empty, &Goal::TimeToTarget { target: "1000".into(), scope: Scope::Portfolio }).is_err());
+        assert!(solve(&empty, &Goal::MonthlyTopUp { target: "1000".into(), scope: Scope::Portfolio }).is_err());
     }
 }
