@@ -504,9 +504,11 @@ input[type="number"]::-webkit-inner-spin-button {
   color: var(--good);
 }
 
-/* "Reach a target" goal row: the same inline, wrapping layout and money
-   adornment as .horizon, one block below it at the foot of the form. No top
-   border of its own — two stacked rules would read as a heavy double divider. */
+/* Goal-seek row (reach a target, or draw it down): the same inline, wrapping
+   layout and money adornment as .horizon, one block below it at the foot of the
+   form. Wrapping is what absorbs the wording that changes with the goal kind.
+   No top border of its own — two stacked rules would read as a heavy double
+   divider. */
 .goal {
   display: flex;
   align-items: center;

@@ -30,7 +30,7 @@ mod summary;
 
 use calc::{calculate, solve, CalcOutput, InvestmentField, Solution};
 use convert::{build_input, RowData};
-use goal::{build_goal, describe, subject_label, PORTFOLIO};
+use goal::{build_goal, describe, subject_label, GoalKind, PORTFOLIO};
 use leptos::leptos_dom::helpers::TimeoutHandle;
 use leptos::*;
 use model::{bind_value, new_row, remove_label, remove_row};
@@ -221,13 +221,14 @@ fn App() -> impl IntoView {
     // the solved sentence or the reason it failed, both as plain text.
     let solution = create_memo(move |_| {
         let target = goal_target.get();
-        if target.trim().is_empty() {
-            return None;
-        }
         let kind = goal_kind.get();
-        // Both goal kinds are now scoped by the same picker, so both subscribe to
-        // `goal_scope`: changing the scope is meant to re-solve either question.
+        // Every goal kind is scoped by the same picker, so all of them subscribe
+        // to `goal_scope`: changing the scope is meant to re-solve the question.
         let scope = goal_scope.get();
+        // Whether a blank box leaves the goal inert is `build_goal`'s call, not
+        // this memo's — "spend it to nothing" is a real max-withdrawal question
+        // with an empty floor box, so an early return on a blank target here
+        // would silently veto it.
         let g = build_goal(&kind, &target, &scope)?;
         let (input, _ids) = build_current();
         let result: Result<Solution, String> = solve(&input, &g).map_err(|e| e.message);
@@ -289,6 +290,22 @@ fn App() -> impl IntoView {
     };
     let horizon_ref = bind_value(horizon_value);
     let goal_ref = bind_value(goal_target);
+
+    // Each `<option>` tests its own value against the current kind, both read
+    // through `GoalKind::parse` so the "unknown/new value -> top-up" default is
+    // decided in one place (the enum), not re-spelled here. Must be per-option
+    // `selected=`, never `prop:value`: in `view!` an element's props are set
+    // before its children mount, so `prop:value` on a `<select>` would run while
+    // there are no `<option>`s to match.
+    let kind_is =
+        move |k: &'static str| move || GoalKind::parse(&goal_kind.get()) == GoalKind::parse(k);
+    // One amount box serves all four kinds, but it means a different thing in
+    // each: a target to reach, a floor to leave behind, or the sum being drawn.
+    // The visible label (and its hint) therefore moves with the picker; the
+    // `for="goal-target"` association is what keeps the accessible name equal to
+    // whatever the label currently reads (WCAG 2.5.3), so no `aria-label`.
+    let goal_label = move || GoalKind::parse(&goal_kind.get()).label();
+    let goal_placeholder = move || GoalKind::parse(&goal_kind.get()).placeholder();
     // As with the row controls: one read of `outcome`, borrowed, shared by the
     // three attributes the horizon input's error state drives.
     let horizon_bad = create_memo(move |_| outcome.with(|o| o.flags_horizon()));
@@ -510,26 +527,46 @@ fn App() -> impl IntoView {
                     </div>
 
                     <div class="goal">
-                        <label for="goal-target">"Reach"</label>
+                        <label for="goal-target">{goal_label}</label>
                         <span class="adorn adorn-money">
                             <input
                                 id="goal-target" type="text" inputmode="decimal"
-                                placeholder="500,000"
+                                placeholder=goal_placeholder
                                 node_ref=goal_ref
                                 on:input=move |ev| goal_target.set(event_target_value(&ev)) />
                         </span>
+                        // Only the "how long does it last" kind is asking about a
+                        // *recurring* sum, so the row reads "Withdraw £1,500 a
+                        // month — how long it lasts". The other three name a
+                        // one-off figure and would be wrong with it.
+                        {move || GoalKind::parse(&goal_kind.get()).is_recurring().then(|| view! {
+                            <span>"a month"</span>
+                        })}
+                        // Grouped by direction: reaching a target and drawing one
+                        // down are opposite questions sharing one box, and the
+                        // group labels are what make that legible in the list.
                         <select
                             aria-label="What to work out"
                             on:change=move |ev| goal_kind.set(event_target_value(&ev))>
-                            <option value="topup" selected=move || goal_kind.get() != "time">
-                                "\u{2014} monthly top-up needed"
-                            </option>
-                            <option value="time" selected=move || goal_kind.get() == "time">
-                                "\u{2014} time needed"
-                            </option>
+                            <optgroup label="Reach a target">
+                                <option value="topup" selected=kind_is("topup")>
+                                    "\u{2014} monthly top-up needed"
+                                </option>
+                                <option value="time" selected=kind_is("time")>
+                                    "\u{2014} time needed"
+                                </option>
+                            </optgroup>
+                            <optgroup label="Draw it down">
+                                <option value="withdrawal" selected=kind_is("withdrawal")>
+                                    "\u{2014} monthly withdrawal you can afford"
+                                </option>
+                                <option value="lasts" selected=kind_is("lasts")>
+                                    "\u{2014} how long it lasts"
+                                </option>
+                            </optgroup>
                         </select>
                         <span>"for"</span>
-                        // What the goal is about, shown in *both* modes so the
+                        // What the goal is about, shown for *every* kind so the
                         // scope is a deliberate choice, not inferred from whether a
                         // picker happens to be visible. "Whole portfolio" is the
                         // combined total; a holding is tracked on its own. Holding

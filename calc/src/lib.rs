@@ -191,7 +191,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         ));
     }
     // Guard against runaway series sizes.
-    if horizon_months > 1200 {
+    if horizon_months > MAX_HORIZON_MONTHS {
         return Err(CalcError::new(
             "Projection horizon is limited to 100 years (1200 months).",
             Some(Field::Horizon),
@@ -446,6 +446,15 @@ pub enum Goal {
     /// Solve for the time, in whole months, until `scope` first reaches `target`,
     /// holding the currently-projected annual rates fixed.
     TimeToTarget { target: String, scope: Scope },
+    /// Solve for the largest recurring monthly withdrawal `scope` can sustain and
+    /// still be worth at least `floor` at the horizon. A `floor` of zero asks the
+    /// other useful question — the draw that makes the pot last exactly as long as
+    /// the horizon and no longer.
+    MaxWithdrawal { floor: String, scope: Scope },
+    /// Solve for how long, in whole months, a fixed monthly withdrawal of `amount`
+    /// lasts before `scope` runs dry, holding the currently-projected annual rates
+    /// fixed (the same freeze [`Goal::TimeToTarget`] needs, for the same reason).
+    TimeToDeplete { amount: String, scope: Scope },
 }
 
 /// The answer to a [`Goal`].
@@ -459,12 +468,26 @@ pub enum Solution {
     /// The target is already met by the inputs as they stand — no top-up needed,
     /// or the portfolio is already worth at least the target today.
     AlreadyMet,
+    /// The largest monthly withdrawal that still leaves the floor, rounded *down*
+    /// to the penny so the figure reported is one the pot genuinely supports.
+    MaxWithdrawal(Decimal),
+    /// Whole months until the scope runs dry under the withdrawal asked about.
+    Depletes(u32),
+    /// The returns cover the withdrawal, so the pot never runs dry — there is no
+    /// month to report rather than a very large one.
+    NeverDepletes,
 }
 
 /// The largest monthly top-up the bracket search will consider before declaring
 /// a target unreachable. A billion a month is comfortably past any real use and
 /// keeps the doubling search bounded.
 const MAX_TOP_UP: i64 = 1_000_000_000;
+
+/// The 100-year projection cap, in months. `calculate` rejects any horizon past
+/// this, and the time-based solvers project out to exactly it — so it must be one
+/// number, not a literal repeated at each site that would let the guard and the
+/// solvers' scan length drift apart.
+const MAX_HORIZON_MONTHS: u32 = 1200;
 
 /// Solve the projection for a [`Goal`]. Shares [`calculate`]'s never-panic
 /// contract: invalid input and unreachable targets come back as `Err`, never a
@@ -473,6 +496,8 @@ pub fn solve(input: &CalcInput, goal: &Goal) -> Result<Solution, CalcError> {
     match goal {
         Goal::MonthlyTopUp { target, scope } => solve_top_up(input, target, *scope),
         Goal::TimeToTarget { target, scope } => solve_time(input, target, *scope),
+        Goal::MaxWithdrawal { floor, scope } => solve_max_withdrawal(input, floor, *scope),
+        Goal::TimeToDeplete { amount, scope } => solve_time_to_deplete(input, amount, *scope),
     }
 }
 
@@ -503,6 +528,20 @@ fn parse_target(target: &str) -> Result<Decimal, CalcError> {
     Ok(t)
 }
 
+/// Apply a monthly cash flow of `amount` across `investments`, split evenly:
+/// each row's `contribution` becomes `amount / len` and its `flow` the given
+/// direction. The one place the "a portfolio top-up or draw is shared equally
+/// across the holdings" convention lives — the live top-up and drawdown probes
+/// and the depletion projection all route their portfolio split through it. A
+/// single holding (`len == 1`) simply takes the whole amount.
+fn spread_evenly(investments: &mut [InvestmentInput], amount: Decimal, flow: Flow) {
+    let each = amount / Decimal::from(investments.len());
+    for inv in investments {
+        inv.contribution = each.to_string();
+        inv.flow = flow;
+    }
+}
+
 /// The value a candidate monthly top-up produces under `scope`: the chosen
 /// holding's projected value (the money added to that one holding), or the
 /// portfolio's projected total (the amount split evenly across every holding).
@@ -521,11 +560,7 @@ fn projected_under(input: &CalcInput, scope: Scope, top_up: Decimal) -> Result<D
             Ok(calculate(&probe)?.investments[i].projected_value)
         }
         Scope::Portfolio => {
-            let each = top_up / Decimal::from(probe.investments.len());
-            for inv in &mut probe.investments {
-                inv.contribution = each.to_string();
-                inv.flow = Flow::Deposit;
-            }
+            spread_evenly(&mut probe.investments, top_up, Flow::Deposit);
             Ok(calculate(&probe)?.projected_total)
         }
     }
@@ -595,20 +630,6 @@ fn solve_time(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution,
     validate_scope(input, scope)?;
     let base = calculate(input)?;
 
-    // Rebuild a row at the annual rate it currently projects at, so a
-    // `Mode::Total` row is frozen instead of re-spread over the new horizon;
-    // `annualised` is a growth fraction, ×100 back to a percent.
-    let frozen = |res: &InvestmentResult, orig: &InvestmentInput| InvestmentInput {
-        name: orig.name.clone(),
-        value: res.current_value.to_string(),
-        mode: Mode::Annual,
-        rate: (res.annualised * Decimal::from(100u32)).to_string(),
-        contribution: orig.contribution.clone(),
-        // Preserve the cash-flow direction, so a holding being drawn down keeps
-        // draining as time is projected forward rather than turning into a saver.
-        flow: orig.flow,
-    };
-
     // The rows to project and today's value to compare against, per scope. A
     // `Holding` scope drops every other row so the series is that holding alone.
     let (investments, current) = match scope {
@@ -617,12 +638,12 @@ fn solve_time(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution,
                 .investments
                 .iter()
                 .zip(base.investments.iter())
-                .map(|(orig, res)| frozen(res, orig))
+                .map(|(orig, res)| frozen_row(res, orig))
                 .collect::<Vec<_>>(),
             base.current_total,
         ),
         Scope::Holding(i) => (
-            vec![frozen(&base.investments[i], &input.investments[i])],
+            vec![frozen_row(&base.investments[i], &input.investments[i])],
             base.investments[i].current_value,
         ),
     };
@@ -633,7 +654,7 @@ fn solve_time(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution,
 
     let long = CalcInput {
         investments,
-        horizon_value: "1200".to_string(),
+        horizon_value: MAX_HORIZON_MONTHS.to_string(),
         horizon_unit: Unit::Months,
     };
     let out = calculate(&long)?;
@@ -653,6 +674,216 @@ fn solve_time(input: &CalcInput, target: &str, scope: Scope) -> Result<Solution,
             None,
         )),
     }
+}
+
+/// Rebuild a row at the annual rate it is *currently* projected at, so a
+/// `Mode::Total` row is frozen instead of re-spread over whatever horizon the
+/// solver goes on to use; `annualised` is a growth fraction, ×100 back to a
+/// percent. Shared by both time-based solvers because both re-project over the
+/// 100-year cap and would otherwise flatten a total-return row.
+///
+/// The cash flow is copied across unchanged, so a holding already being drawn
+/// down keeps draining as time is projected forward rather than turning into a
+/// saver. A caller that is *asking about* a particular withdrawal overrides
+/// `contribution`/`flow` afterwards.
+fn frozen_row(res: &InvestmentResult, orig: &InvestmentInput) -> InvestmentInput {
+    InvestmentInput {
+        name: orig.name.clone(),
+        value: res.current_value.to_string(),
+        mode: Mode::Annual,
+        rate: (res.annualised * Decimal::from(100u32)).to_string(),
+        contribution: orig.contribution.clone(),
+        flow: orig.flow,
+    }
+}
+
+/// The value `scope` ends the horizon at under a candidate monthly withdrawal of
+/// `w`, together with the month it runs dry (if it does). The mirror of
+/// [`projected_under`]: that one forces [`Flow::Deposit`] because a top-up must be
+/// paid *in*, this one forces [`Flow::Withdraw`] because a drawdown must be taken
+/// *out*. Either way the row's own picker is overridden, so the answer never
+/// depends on how the user happened to leave it.
+///
+/// Both readings move monotonically in `w`: drawing more can only leave a smaller
+/// balance in every month, so the final value never rises and the depletion month
+/// never gets later. That monotonicity is what makes the bracket-and-bisect search
+/// below sound.
+fn drawdown_outcome(
+    input: &CalcInput,
+    scope: Scope,
+    w: Decimal,
+) -> Result<(Decimal, Option<u32>), CalcError> {
+    let mut probe = input.clone();
+    match scope {
+        Scope::Holding(i) => {
+            probe.investments[i].contribution = w.to_string();
+            probe.investments[i].flow = Flow::Withdraw;
+            let out = calculate(&probe)?;
+            let row = &out.investments[i];
+            Ok((row.projected_value, row.depletion_month))
+        }
+        Scope::Portfolio => {
+            // Split evenly across the holdings — the same convention the portfolio
+            // top-up uses — so the figure reported is always the *total* monthly
+            // draw the user takes, not a per-holding share.
+            spread_evenly(&mut probe.investments, w, Flow::Withdraw);
+            let out = calculate(&probe)?;
+            Ok((out.projected_total, out.depletion_month))
+        }
+    }
+}
+
+/// Bisection on the monthly *withdrawal*: the largest draw that still leaves
+/// `floor` in `scope` at the horizon. The inverse of [`solve_top_up`] in every
+/// sense — the feasible side of the bracket is the *low* one (drawing less is
+/// always at least as safe), and the answer is rounded down rather than up.
+fn solve_max_withdrawal(input: &CalcInput, floor: &str, scope: Scope) -> Result<Solution, CalcError> {
+    // The amount to leave at the end is a target value like any other, so it gets
+    // the same "valid, non-negative" parse.
+    let floor = parse_target(floor)?;
+    validate_scope(input, scope)?;
+
+    let subject = match scope {
+        Scope::Portfolio => "The portfolio",
+        Scope::Holding(_) => "This holding",
+    };
+
+    // Is a candidate draw acceptable? Deliberately two different questions,
+    // because the pot clamps at £0. With a positive floor, "did it end at or above
+    // the floor?" says it. With a zero floor that test is *trivially true for every
+    // withdrawal* — an emptied pot still ends at exactly £0.00, so `final >= 0`
+    // would call a draw that bankrupts the holding in month one "feasible". A zero
+    // floor therefore asks the question that actually separates the two: did it
+    // survive the whole horizon without ever running dry?
+    let feasible = |w: Decimal| -> Result<bool, CalcError> {
+        let (final_value, depletion) = drawdown_outcome(input, scope, w)?;
+        Ok(if floor > Decimal::ZERO {
+            final_value >= floor
+        } else {
+            depletion.is_none()
+        })
+    };
+
+    // Nothing to solve if the scope can't hold the floor even untouched — the
+    // shortfall is in the projection, not in the withdrawal, and no draw (not even
+    // zero) can fix it.
+    if !feasible(Decimal::ZERO)? {
+        return Err(CalcError::new(
+            if floor.is_zero() {
+                format!("{subject} runs dry before the end even with no withdrawals, so there is nothing to draw down.")
+            } else {
+                format!(
+                    "{subject} cannot leave {} at the end even with no withdrawals; lower the amount to leave or extend the horizon.",
+                    fmt_money_plain(floor)
+                )
+            },
+            None,
+        ));
+    }
+
+    // Bracket: double the draw until one is too big to sustain. `hi` is clamped to
+    // the cap so the doubling always terminates; a cap that is *still* sustainable
+    // means the pot is large enough (or growing fast enough) that no answer inside
+    // the reportable range exists.
+    let cap = Decimal::from(MAX_TOP_UP);
+    let mut hi = Decimal::ONE;
+    while feasible(hi)? {
+        if hi >= cap {
+            return Err(CalcError::new(
+                format!(
+                    "{subject} can sustain more than {} a month, which is beyond the range this solver reports.",
+                    fmt_money_plain(cap)
+                ),
+                None,
+            ));
+        }
+        hi = (hi * Decimal::from(2u32)).min(cap);
+    }
+
+    // Bisect the bracket to the penny. `lo` is always a draw that holds and `hi`
+    // one that doesn't — the opposite arrangement to `solve_top_up`, because
+    // feasibility here is downward-closed.
+    let mut lo = Decimal::ZERO;
+    let cent = Decimal::new(1, 2); // 0.01
+    for _ in 0..80 {
+        if hi - lo <= cent {
+            break;
+        }
+        let mid = (lo + hi) / Decimal::from(2u32);
+        if feasible(mid)? {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // Round *down* to the penny — the mirror of the top-up's round up. Rounding up
+    // would cross the boundary just bracketed and hand back a draw that breaches
+    // the floor, or empties the pot before the horizon.
+    let mut answer = lo.round_dp_with_strategy(2, RoundingStrategy::ToZero);
+    // The bracket is a penny wide, so the true boundary can sit either side of the
+    // penny `lo` floors to. Settle that last penny against `calculate` itself
+    // rather than trusting the arithmetic: step up while the next penny still
+    // holds. `hi - lo <= 0.01` bounds this at two steps; the loop is bounded
+    // regardless, since the never-hang contract outranks the extra penny.
+    for _ in 0..3 {
+        if !feasible(answer + cent)? {
+            break;
+        }
+        answer += cent;
+    }
+
+    Ok(Solution::MaxWithdrawal(answer))
+}
+
+/// How long a fixed monthly withdrawal lasts. Same skeleton as [`solve_time`] and
+/// for the same reason — a `Mode::Total` row's rate is defined *relative to the
+/// horizon*, so re-projecting over the 100-year cap without freezing it first
+/// would quietly flatten the row — but the answer is read straight off the
+/// projection instead of scanned for: [`calculate`] already records the month a
+/// pot first hits £0, so there is nothing to bisect.
+fn solve_time_to_deplete(input: &CalcInput, amount: &str, scope: Scope) -> Result<Solution, CalcError> {
+    let amount = parse_target(amount)?;
+    validate_scope(input, scope)?;
+    let base = calculate(input)?;
+
+    // Nothing being drawn, so nothing to run out — answer directly rather than
+    // projecting a century of a pot that is never touched.
+    if amount.is_zero() {
+        return Ok(Solution::NeverDepletes);
+    }
+
+    // The rows to project. A `Holding` scope drops every other row (so the whole
+    // draw lands on it); a `Portfolio` scope keeps them all.
+    let mut investments = match scope {
+        Scope::Portfolio => input
+            .investments
+            .iter()
+            .zip(base.investments.iter())
+            .map(|(orig, res)| frozen_row(res, orig))
+            .collect::<Vec<_>>(),
+        Scope::Holding(i) => vec![frozen_row(&base.investments[i], &input.investments[i])],
+    };
+    // The question is about *this* withdrawal, so it replaces whatever cash flow
+    // the rows carry — otherwise an existing top-up would be answered instead.
+    // `spread_evenly` splits a portfolio draw across the rows and puts a holding
+    // draw on its single row, the same convention `drawdown_outcome` uses.
+    spread_evenly(&mut investments, amount, Flow::Withdraw);
+
+    let long = CalcInput {
+        investments,
+        horizon_value: MAX_HORIZON_MONTHS.to_string(),
+        horizon_unit: Unit::Months,
+    };
+    let out = calculate(&long)?;
+
+    // `depletion_month` is `None` when the pot outlasts the 100-year cap, which is
+    // the honest answer: the returns cover the draw. Reporting 1200 months instead
+    // would read as a deadline that isn't there.
+    Ok(match out.depletion_month {
+        Some(m) => Solution::Depletes(m),
+        None => Solution::NeverDepletes,
+    })
 }
 
 /// A grouped `£1,234.56` for embedding in error messages, matching the UI's
@@ -1454,5 +1685,196 @@ mod tests {
         let empty = CalcInput { investments: vec![], horizon_value: "10".into(), horizon_unit: Unit::Years };
         assert!(solve(&empty, &Goal::TimeToTarget { target: "1000".into(), scope: Scope::Portfolio }).is_err());
         assert!(solve(&empty, &Goal::MonthlyTopUp { target: "1000".into(), scope: Scope::Portfolio }).is_err());
+    }
+
+    // --- solve: maximum sustainable withdrawal -----------------------------
+
+    /// Project a single-holding input at an explicit fixed monthly draw, the way
+    /// the UI would once the user typed the solver's answer in.
+    fn drawn_down(input: &CalcInput, draw: Decimal) -> InvestmentResult {
+        let mut probe = input.clone();
+        probe.investments[0].contribution = draw.to_string();
+        probe.investments[0].flow = Flow::Withdraw;
+        calculate(&probe).unwrap().investments[0].clone()
+    }
+
+    #[test]
+    fn max_withdrawal_holds_the_floor_and_a_penny_more_breaches_it() {
+        // The property that matters, asserted as a property rather than a magic
+        // number: the reported draw really does leave the floor, and one penny
+        // more really does not. The row is left on `Flow::Deposit` on purpose —
+        // the solver must force the direction rather than answer the wrong
+        // question because of how the picker was left.
+        let input = with_flow("100000", Mode::Annual, "5", "0", Flow::Deposit, "20", Unit::Years);
+        let floor = d("50000");
+        let Solution::MaxWithdrawal(w) = solve(
+            &input,
+            &Goal::MaxWithdrawal { floor: "50000".into(), scope: Scope::Holding(0) },
+        )
+        .unwrap() else {
+            panic!("expected a MaxWithdrawal solution");
+        };
+
+        assert!(w > Decimal::ZERO);
+        assert!(
+            drawn_down(&input, w).projected_value >= floor,
+            "the reported draw must leave the floor"
+        );
+        assert!(
+            drawn_down(&input, w + d("0.01")).projected_value < floor,
+            "a penny more must breach the floor"
+        );
+    }
+
+    #[test]
+    fn a_zero_floor_spends_the_pot_by_the_horizon() {
+        // A floor of £0 asks for the draw that makes the money last exactly as
+        // long as the horizon. Note this is the case `final >= floor` cannot
+        // answer — an emptied pot also ends at £0.00 — so the solver tests
+        // survival instead, and that is what is asserted here.
+        let input = with_flow("100000", Mode::Annual, "5", "0", Flow::Withdraw, "10", Unit::Years);
+        let Solution::MaxWithdrawal(w) = solve(
+            &input,
+            &Goal::MaxWithdrawal { floor: "0".into(), scope: Scope::Holding(0) },
+        )
+        .unwrap() else {
+            panic!("expected a MaxWithdrawal solution");
+        };
+
+        let row = drawn_down(&input, w);
+        assert_eq!(row.depletion_month, None, "the answer must last the horizon");
+        // All but spent: less than one further month's draw is left at the end.
+        assert!(
+            row.projected_value < w,
+            "the pot should be all but empty at the horizon, not {}",
+            row.projected_value
+        );
+        // A penny more a month and it runs dry before the horizon is up.
+        assert!(drawn_down(&input, w + d("0.01")).depletion_month.is_some());
+    }
+
+    #[test]
+    fn an_unreachable_floor_errors_and_names_it() {
+        // £10,000 at 3% over 10 years ends around £13,400, so it cannot leave
+        // £50,000 however little is drawn. That is not a withdrawal the search can
+        // shrink its way to — it must say so, and name the figure it failed.
+        let input = with_flow("10000", Mode::Annual, "3", "0", Flow::Withdraw, "10", Unit::Years);
+        let err = solve(
+            &input,
+            &Goal::MaxWithdrawal { floor: "50000".into(), scope: Scope::Holding(0) },
+        )
+        .unwrap_err();
+        assert!(err.message.contains("\u{00a3}50,000.00"), "{}", err.message);
+        assert!(err.message.contains("This holding"));
+        assert!(err.field.is_none());
+    }
+
+    #[test]
+    fn max_withdrawal_on_the_portfolio_holds_for_the_combined_total() {
+        // Portfolio scope splits the draw evenly and measures the combined total,
+        // so round-trip through the same split the solver used.
+        let input = two_holdings();
+        let floor = d("100000");
+        let Solution::MaxWithdrawal(total) = solve(
+            &input,
+            &Goal::MaxWithdrawal { floor: "100000".into(), scope: Scope::Portfolio },
+        )
+        .unwrap() else {
+            panic!("expected a MaxWithdrawal solution");
+        };
+
+        assert!(drawdown_outcome(&input, Scope::Portfolio, total).unwrap().0 >= floor);
+        assert!(
+            drawdown_outcome(&input, Scope::Portfolio, total + d("0.01")).unwrap().0 < floor
+        );
+    }
+
+    // --- solve: time to deplete --------------------------------------------
+
+    #[test]
+    fn time_to_deplete_agrees_with_the_projection() {
+        // £12,000 at 0% drawing £500 a month runs dry at month 24. Cross-check the
+        // solver against what `calculate` reports for the equivalent withdrawing
+        // row, so the two can't drift apart.
+        let input = with_flow("12000", Mode::Annual, "0", "0", Flow::Deposit, "10", Unit::Years);
+        let sol = solve(
+            &input,
+            &Goal::TimeToDeplete { amount: "500".into(), scope: Scope::Holding(0) },
+        )
+        .unwrap();
+        assert_eq!(sol, Solution::Depletes(24));
+        assert_eq!(drawn_down(&input, d("500")).depletion_month, Some(24));
+    }
+
+    #[test]
+    fn a_draw_covered_by_returns_never_depletes() {
+        // £100,000 at 6% earns roughly £490 in its first month, so a £100 draw is
+        // paid out of returns and the pot only grows.
+        let input = with_flow("100000", Mode::Annual, "6", "0", Flow::Withdraw, "10", Unit::Years);
+        assert_eq!(
+            solve(&input, &Goal::TimeToDeplete { amount: "100".into(), scope: Scope::Holding(0) })
+                .unwrap(),
+            Solution::NeverDepletes
+        );
+        // And drawing nothing is trivially never — no projection needed.
+        assert_eq!(
+            solve(&input, &Goal::TimeToDeplete { amount: "0".into(), scope: Scope::Holding(0) })
+                .unwrap(),
+            Solution::NeverDepletes
+        );
+    }
+
+    #[test]
+    fn a_larger_draw_never_lasts_longer() {
+        // Monotonicity is the invariant the whole drawdown search rests on: taking
+        // more out can only empty the pot sooner. "Never" counts as the longest
+        // span of all, so it can only appear at the small end.
+        let input = with_flow("50000", Mode::Annual, "4", "0", Flow::Withdraw, "10", Unit::Years);
+        let span = |amount: &str| {
+            match solve(
+                &input,
+                &Goal::TimeToDeplete { amount: amount.into(), scope: Scope::Holding(0) },
+            )
+            .unwrap()
+            {
+                Solution::Depletes(m) => m,
+                Solution::NeverDepletes => u32::MAX,
+                other => panic!("unexpected solution {other:?}"),
+            }
+        };
+        let mut previous = u32::MAX;
+        for amount in ["100", "200", "400", "800", "1600", "3200", "6400"] {
+            let months = span(amount);
+            assert!(
+                months <= previous,
+                "drawing {amount} lasted {months} months, longer than the smaller draw's {previous}"
+            );
+            previous = months;
+        }
+    }
+
+    #[test]
+    fn time_to_deplete_on_the_portfolio_splits_the_draw() {
+        // Two holdings at 0%, £2,000 a month split evenly: the £1,000 holding is
+        // gone after one month, the £500,000 one after 500. The *portfolio* is dry
+        // only once both are, so the answer is the later month, not the earlier.
+        let input = two_holdings();
+        let sol = solve(
+            &input,
+            &Goal::TimeToDeplete { amount: "2000".into(), scope: Scope::Portfolio },
+        )
+        .unwrap();
+        assert_eq!(sol, Solution::Depletes(500));
+    }
+
+    #[test]
+    fn drawdown_goals_reject_bad_input_like_the_others() {
+        let input = with_flow("10000", Mode::Annual, "5", "0", Flow::Withdraw, "10", Unit::Years);
+        assert!(solve(&input, &Goal::MaxWithdrawal { floor: "abc".into(), scope: Scope::Holding(0) }).is_err());
+        assert!(solve(&input, &Goal::MaxWithdrawal { floor: "-1".into(), scope: Scope::Holding(0) }).is_err());
+        assert!(solve(&input, &Goal::MaxWithdrawal { floor: "0".into(), scope: Scope::Holding(9) }).is_err());
+        assert!(solve(&input, &Goal::TimeToDeplete { amount: "abc".into(), scope: Scope::Holding(0) }).is_err());
+        assert!(solve(&input, &Goal::TimeToDeplete { amount: "-1".into(), scope: Scope::Holding(0) }).is_err());
+        assert!(solve(&input, &Goal::TimeToDeplete { amount: "100".into(), scope: Scope::Holding(9) }).is_err());
     }
 }
