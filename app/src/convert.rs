@@ -1,19 +1,19 @@
 //! Turning the raw form strings into a `calc::CalcInput`.
 //!
 //! This is the marshalling layer between the reactive UI and the pure `calc`
-//! core: it applies the UI's own conventions (blank means zero, the two
-//! `<select>` string values map to `calc` enums) and — critically — filters out
-//! blank rows *before* `calc` sees them. That filtering breaks the index
-//! correspondence between `CalcInput::investments` and the rows on screen, so
-//! [`build_input`] also returns the surviving rows' ids in order; the memo in
-//! `main.rs` pairs that with a [`crate::outcome::Outcome`] so a `calc` error can
-//! be mapped back to the right control.
+//! core: it applies the UI's own conventions (blank means zero, the `<select>`
+//! string values map to `calc` enums) and — critically — filters out blank rows
+//! *before* `calc` sees them. That filtering breaks the index correspondence
+//! between `CalcInput::investments` and the rows on screen, so [`build_input`]
+//! also returns the surviving rows' ids in order; the memo in `main.rs` pairs
+//! that with a [`crate::outcome::Outcome`] so a `calc` error can be mapped back
+//! to the right control.
 //!
 //! All of this is pure (no signals, no DOM), so it is unit-tested natively — the
-//! `RowData` snapshots the reactive `Row` down to plain strings for exactly that
-//! reason.
+//! [`FormInput`]/[`RowData`] snapshot the reactive form down to plain strings for
+//! exactly that reason.
 
-use calc::{CalcInput, Flow, InvestmentInput, Mode, Unit};
+use calc::{CalcInput, InvestmentInput, Plan, Unit};
 
 /// A plain-string snapshot of one editor row, decoupled from the reactive
 /// `Row`'s signals so the input-building logic can be tested without a runtime.
@@ -27,27 +27,35 @@ pub struct RowData {
     pub id: usize,
     pub name: String,
     pub value: String,
-    pub mode: String,
     pub rate: String,
     pub contribution: String,
-    /// The monthly cash-flow direction: `"deposit"`, `"withdraw"`, or
-    /// `"withdraw_pct"`. `#[serde(default)]` yields `""` for links made before
-    /// this field existed, which [`flow_from`] reads as the deposit default.
-    #[serde(default)]
-    pub flow: String,
 }
 
-/// Build the `calc` input from the current rows, dropping blank ones. Returns
-/// the input alongside the ids of the rows that survived the filter, in order,
-/// so a `CalcError`'s index (into `CalcInput::investments`) can be mapped back to
-/// the row on screen that caused it.
-pub fn build_input(
-    rows: &[RowData],
-    horizon_value: &str,
-    horizon_unit: &str,
-) -> (CalcInput, Vec<usize>) {
+/// A plain-string snapshot of the whole form, decoupled from the signals. The
+/// single argument to [`build_input`], so adding a form-level control means one
+/// new field here rather than another positional string parameter. Deliberately
+/// *not* `serde` and deliberately without the goal fields: it feeds the
+/// projection memo, whose dependency set must stay as narrow as it is — typing in
+/// the goal box must not re-run `calculate`.
+pub struct FormInput {
+    pub rows: Vec<RowData>,
+    pub horizon_value: String,
+    pub horizon_unit: String,
+    /// `"deposits"` or `"drawdown"` — the top-level mode.
+    pub plan: String,
+    pub drawdown_value: String,
+    pub drawdown_unit: String,
+    pub withdrawal: String,
+}
+
+/// Build the `calc` input from the current form, dropping blank rows. Returns the
+/// input alongside the ids of the rows that survived the filter, in order, so a
+/// `CalcError`'s index (into `CalcInput::investments`) can be mapped back to the
+/// row on screen that caused it.
+pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
     let mut row_ids = Vec::new();
-    let investments: Vec<InvestmentInput> = rows
+    let investments: Vec<InvestmentInput> = f
+        .rows
         .iter()
         .filter_map(|r| {
             // Skip blank rows so a half-typed row doesn't error the form. A row
@@ -66,18 +74,17 @@ pub fn build_input(
                     r.name.clone()
                 },
                 value: blank_zero(&r.value),
-                mode: mode_from(&r.mode),
                 rate: blank_zero(&r.rate),
                 contribution: blank_zero(&r.contribution),
-                flow: flow_from(&r.flow),
             })
         })
         .collect();
 
     let input = CalcInput {
         investments,
-        horizon_value: blank_zero(horizon_value),
-        horizon_unit: unit_from(horizon_unit),
+        horizon_value: blank_zero(&f.horizon_value),
+        horizon_unit: unit_from(&f.horizon_unit),
+        plan: plan_from(&f.plan, &f.drawdown_value, &f.drawdown_unit, &f.withdrawal),
     };
     (input, row_ids)
 }
@@ -92,8 +99,8 @@ pub fn blank_zero(s: &str) -> String {
     }
 }
 
-/// The horizon unit `<select>`'s string value → `calc::Unit`. Anything other
-/// than `"months"` is years (the default option).
+/// A period unit `<select>`'s string value → `calc::Unit`. Anything other than
+/// `"months"` is years (the default option).
 pub fn unit_from(s: &str) -> Unit {
     if s == "months" {
         Unit::Months
@@ -102,24 +109,19 @@ pub fn unit_from(s: &str) -> Unit {
     }
 }
 
-/// A row's return-basis `<select>` value → `calc::Mode`. Anything other than
-/// `"total"` is the annualised default.
-pub fn mode_from(s: &str) -> Mode {
-    if s == "total" {
-        Mode::Total
+/// The top-level mode → `calc::Plan`. Anything other than `"drawdown"` (including
+/// a blank from a pre-mode shared link) is the deposits default, so the drawdown
+/// period and withdrawal are only read when actually drawing down.
+pub fn plan_from(plan: &str, drawdown_value: &str, drawdown_unit: &str, withdrawal: &str) -> Plan {
+    if plan == "drawdown" {
+        Plan::Drawdown {
+            drawdown_value: blank_zero(drawdown_value),
+            drawdown_unit: unit_from(drawdown_unit),
+            // A blank withdrawal is a flat drawdown (zero), which `calc` accepts.
+            withdrawal: blank_zero(withdrawal),
+        }
     } else {
-        Mode::Annual
-    }
-}
-
-/// A row's cash-flow `<select>` value → `calc::Flow`. Anything other than the
-/// two withdrawal values (including a blank from a pre-`flow` shared link) is the
-/// deposit default, so old links and new blank rows behave exactly as before.
-pub fn flow_from(s: &str) -> Flow {
-    match s {
-        "withdraw" => Flow::Withdraw,
-        "withdraw_pct" => Flow::WithdrawPercent,
-        _ => Flow::Deposit,
+        Plan::Deposits
     }
 }
 
@@ -132,21 +134,21 @@ mod tests {
             id,
             name: name.into(),
             value: value.into(),
-            mode: "annual".into(),
             rate: rate.into(),
             contribution: contribution.into(),
-            flow: "deposit".into(),
         }
     }
 
-    #[test]
-    fn flow_from_defaults_to_deposit() {
-        assert!(flow_from("withdraw") == Flow::Withdraw);
-        assert!(flow_from("withdraw_pct") == Flow::WithdrawPercent);
-        // Blank (a pre-`flow` shared link) and anything unknown are deposits.
-        assert!(flow_from("") == Flow::Deposit);
-        assert!(flow_from("deposit") == Flow::Deposit);
-        assert!(flow_from("nonsense") == Flow::Deposit);
+    fn form(rows: Vec<RowData>, horizon_value: &str, horizon_unit: &str) -> FormInput {
+        FormInput {
+            rows,
+            horizon_value: horizon_value.into(),
+            horizon_unit: horizon_unit.into(),
+            plan: "deposits".into(),
+            drawdown_value: "30".into(),
+            drawdown_unit: "years".into(),
+            withdrawal: String::new(),
+        }
     }
 
     #[test]
@@ -161,21 +163,40 @@ mod tests {
 
     #[test]
     fn unit_from_defaults_to_years() {
-        // `calc::Unit`/`Mode` don't derive `Debug`, so compare with `==` rather
-        // than `assert_eq!` (which would need it for its failure message).
+        // `calc::Unit` compares with `==`.
         assert!(unit_from("months") == Unit::Months);
         assert!(unit_from("years") == Unit::Years);
-        // Unknown strings fall back to the default option, not an error.
         assert!(unit_from("") == Unit::Years);
         assert!(unit_from("decades") == Unit::Years);
     }
 
     #[test]
-    fn mode_from_defaults_to_annual() {
-        assert!(mode_from("total") == Mode::Total);
-        assert!(mode_from("annual") == Mode::Annual);
-        assert!(mode_from("") == Mode::Annual);
-        assert!(mode_from("yearly") == Mode::Annual);
+    fn plan_from_defaults_to_deposits() {
+        assert!(plan_from("deposits", "30", "years", "2000") == Plan::Deposits);
+        // Blank (a pre-mode shared link) and anything unknown are deposits.
+        assert!(plan_from("", "30", "years", "2000") == Plan::Deposits);
+        assert!(plan_from("nonsense", "30", "years", "2000") == Plan::Deposits);
+    }
+
+    #[test]
+    fn plan_from_carries_the_drawdown_fields() {
+        let p = plan_from("drawdown", "30", "years", "2000");
+        assert!(
+            p == Plan::Drawdown {
+                drawdown_value: "30".into(),
+                drawdown_unit: Unit::Years,
+                withdrawal: "2000".into(),
+            }
+        );
+        // A blank withdrawal becomes "0" (a flat drawdown), never an empty string.
+        let blank = plan_from("drawdown", "30", "months", "  ");
+        assert!(
+            blank == Plan::Drawdown {
+                drawdown_value: "30".into(),
+                drawdown_unit: Unit::Months,
+                withdrawal: "0".into(),
+            }
+        );
     }
 
     #[test]
@@ -185,16 +206,15 @@ mod tests {
             row(1, "", "", "", ""), // fully blank -> dropped
             row(2, "C", "", "", "50"), // kept: has a contribution only
         ];
-        let (input, ids) = build_input(&rows, "10", "years");
+        let (input, ids) = build_input(&form(rows, "10", "years"));
         assert_eq!(input.investments.len(), 2);
         assert_eq!(ids, vec![0, 2]);
     }
 
     #[test]
     fn build_input_keeps_a_row_present_by_any_single_field() {
-        // Each row is non-blank via exactly one of value / rate / contribution.
         for (v, r, c) in [("1", "", ""), ("", "5", ""), ("", "", "10")] {
-            let (input, ids) = build_input(&[row(9, "", v, r, c)], "10", "years");
+            let (input, ids) = build_input(&form(vec![row(9, "", v, r, c)], "10", "years"));
             assert_eq!(input.investments.len(), 1, "value/rate/contrib = {v:?}/{r:?}/{c:?}");
             assert_eq!(ids, vec![9]);
         }
@@ -203,37 +223,46 @@ mod tests {
     #[test]
     fn build_input_row_ids_survive_a_dropped_middle_row() {
         // The load-bearing case: dropping the middle row must not shift the
-        // mapping. calc will index investments 0,1; row_ids must map those back
-        // to the on-screen ids 11 and 13, skipping the blank 12.
+        // mapping.
         let rows = vec![
             row(11, "A", "1000", "", ""),
             row(12, "", "", "", ""), // dropped
             row(13, "C", "2000", "", ""),
         ];
-        let (input, ids) = build_input(&rows, "10", "years");
+        let (input, ids) = build_input(&form(rows, "10", "years"));
         assert_eq!(input.investments.len(), 2);
         assert_eq!(ids, vec![11, 13]);
     }
 
     #[test]
     fn build_input_defaults_blanks_and_names() {
-        let rows = vec![row(0, "   ", "1000", "", "")];
-        let (input, _) = build_input(&rows, "  ", "years");
+        let (input, _) = build_input(&form(vec![row(0, "   ", "1000", "", "")], "  ", "years"));
         let inv = &input.investments[0];
-        // Blank name -> the placeholder calc labels errors with.
         assert_eq!(inv.name, "Investment");
-        // Blank numeric fields -> "0", not empty (which calc would reject).
         assert_eq!(inv.rate, "0");
         assert_eq!(inv.contribution, "0");
-        // Present field passes through verbatim.
         assert_eq!(inv.value, "1000");
-        // Blank horizon -> "0" too.
         assert_eq!(input.horizon_value, "0");
     }
 
     #[test]
+    fn build_input_threads_the_drawdown_plan_through() {
+        let mut f = form(vec![row(0, "A", "1000", "7", "")], "10", "years");
+        f.plan = "drawdown".into();
+        f.withdrawal = "2000".into();
+        let (input, _) = build_input(&f);
+        assert!(
+            input.plan == Plan::Drawdown {
+                drawdown_value: "30".into(),
+                drawdown_unit: Unit::Years,
+                withdrawal: "2000".into(),
+            }
+        );
+    }
+
+    #[test]
     fn build_input_passes_horizon_through() {
-        let (input, _) = build_input(&[row(0, "A", "1000", "7", "")], "36", "months");
+        let (input, _) = build_input(&form(vec![row(0, "A", "1000", "7", "")], "36", "months"));
         assert_eq!(input.horizon_value, "36");
         assert!(input.horizon_unit == Unit::Months);
     }

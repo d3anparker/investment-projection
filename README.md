@@ -2,11 +2,20 @@
 
 A single-page tool that projects the future value of a group of investments.
 Each holding is entered as its **value today** (principal plus any historical
-compounding already baked in) plus a forward-looking return figure — either an
-**annualised** rate or a **total return** expected over the whole horizon — and
-an optional **monthly top-up** (an ongoing recurring investment). Enter a
-horizon (in months or years) and it extrapolates each holding forward, sums
-them into a portfolio, and charts the result.
+compounding already baked in), an **annualised return**, and an optional
+**monthly deposit** (an ongoing recurring investment). Enter a horizon (in
+months or years) and it extrapolates each holding forward, sums them into a
+portfolio, and charts the result.
+
+A **mode switch** flips the whole tool between two questions:
+
+- **Building it up** — grow the portfolio over the horizon. Goal-seek asks *what
+  monthly top-up reaches £X* or *how long until £X*.
+- **Drawing it down** — grow for the horizon, then spend the **projected** pot
+  down over a second period, taking a monthly withdrawal from the whole
+  portfolio (split across holdings pro-rata and rebalanced each month). Goal-seek
+  asks *how much can I withdraw and empty it exactly on time* or *how long a
+  given withdrawal lasts*. The chart runs continuously across both phases.
 
 Amounts can be typed however you like — `10000`, `10,000` and `£10,000` all
 parse. The chart is scrubbable: point at it, or focus it and use the arrow
@@ -72,37 +81,39 @@ First-time setup: create a public repo, push, then set **Settings → Pages → 
 
 ## How the numbers work
 
-The **horizon** (years or months) is converted to whole months in `Decimal`
-(fractional periods are rounded there, not in the UI), clamped to a minimum of
-1 month and a maximum of 1200 (100 years). Each holding then needs a single
-**annualised rate**, derived from whichever return figure was entered:
+Each period (years or months) is converted to whole months in `Decimal`
+(fractional periods are rounded there, not in the UI). The growth period is
+clamped to 1–1200 months (100 years); in drawdown mode the growth and drawdown
+periods together are capped at 1200. Each holding compounds its value-today
+forward at its **annualised rate**: the monthly factor is `(1 + annual)^(1/12)`,
+and each month the running value is compounded and then the **monthly deposit**
+is added at month end (so today's value is unaffected — the money isn't invested
+yet). Month 0 is today's value, so the series has `totalMonths + 1` points; the
+portfolio line is the sum across holdings. Fractional exponents use
+`rust_decimal`'s decimal `powd`, so no `f64` enters the calculation.
 
-- **Annualised input** — the rate you enter *is* the annualised rate, used
-  directly.
-- **Total-return input** — the figure is the cumulative return expected over the
-  whole projection horizon, so the equivalent annualised rate is derived as
-  `(1 + total)^(12 / horizonMonths) − 1`. This makes the holding land exactly on
-  `value × (1 + total)` at the horizon.
+In **drawdown mode** the accumulation runs exactly as above for the growth
+period, producing the *handover pot* (`series[growthMonths]`). After that, each
+month the running value is compounded and then a single portfolio-level
+**withdrawal** is taken, apportioned across the holdings in proportion to their
+current value and rebalanced every month — so the whole portfolio empties
+together if the draw outpaces the returns. The withdrawal is capped at the pot,
+so the reported total never exceeds what was there. It is one continuous series;
+the handover is just the month deposits stop and withdrawals begin.
 
-The projection compounds each holding's value-today forward at that annualised
-rate: the monthly factor is `(1 + annual)^(1/12)`, and each month the running
-value is compounded and then the **monthly top-up** is added at month end (so
-today's value is unaffected — the money isn't invested yet). Month 0 is today's
-value, so the series has `horizonMonths + 1` points; the portfolio line is the
-sum across holdings. Fractional exponents use `rust_decimal`'s decimal `powd`,
-so no `f64` enters the calculation.
+**Projected growth** is reported as *returns only*: the final value less today's
+value *and* less the net cash you moved in (deposits minus withdrawals), so
+neither your own deposits nor money you withdrew is counted as investment
+performance. Its percentage is that gain over the capital actually deployed
+(today's value plus all deposits) — a simple return on capital, not a
+money-weighted IRR. The UI states that denominator ("of £39,000 put in") rather
+than leaving a bare percentage to be interpreted.
 
-**Projected growth** is reported as *returns only*: the final value less both
-today's value and the total you contribute along the way, so your own deposits
-are never counted as gains. Its percentage is that gain over the capital
-actually deployed (today's value plus all contributions) — a simple return on
-capital, not a money-weighted IRR. The UI states that denominator ("of £39,000
-put in") rather than leaving a bare percentage to be interpreted.
-
-The per-holding table shows top-ups as their own column for the same reason.
-A row reading `£10,000 → £53,881.86 at +7.00%` looks wrong on its own —
-£10,000 at 7% for ten years is £19,671 — until you can see the £24,000 of
-monthly top-ups that bridge the gap.
+The per-holding table shows deposits (and, in drawdown mode, the handover value
+and the amount withdrawn) as their own columns for the same reason. A row
+reading `£10,000 → £53,881.86 at +7.00%` looks wrong on its own — £10,000 at 7%
+for ten years is £19,671 — until you can see the £24,000 of monthly deposits
+that bridge the gap.
 
 ## Accessibility
 

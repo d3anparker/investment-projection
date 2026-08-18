@@ -23,11 +23,24 @@ pub fn SummaryPanel(
 /// results column.
 fn summary_view(out: &CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months;
+    let span = out.total_months;
+    let drawdown = out.drawdown_months;
     let gain = !out.growth.is_sign_negative();
     let growth_color = format!("color: var({})", if gain { "--good" } else { "--bad" });
 
-    // Only surface contributions when there actually are some, so a portfolio
-    // without top-ups keeps the lean summary.
+    // In drawdown mode, the pot at the start of drawdown is the figure the whole
+    // second phase draws from — shown so a falling final value still reconciles.
+    let handover_stat = out.handover_total.map(|pot| {
+        view! {
+            <div class="stat">
+                <span class="stat-label">{format!("After {} of growth", horizon_label(horizon))}</span>
+                <span class="stat-value">{fmt_money(pot)}</span>
+            </div>
+        }
+    });
+
+    // Only surface deposits when there actually are some, so a portfolio without
+    // top-ups keeps the lean summary. Deposits accrue over the growth period.
     let contributions_stat = (!out.contributed_total.is_zero()).then(|| {
         view! {
             <div class="stat">
@@ -38,24 +51,24 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
     });
 
     // Likewise, only show withdrawals when the portfolio is actually being drawn
-    // down, so a pure-saver projection is unchanged.
+    // down. They accrue over the drawdown period.
     let withdrawals_stat = (!out.withdrawn_total.is_zero()).then(|| {
         view! {
             <div class="stat">
-                <span class="stat-label">{format!("Taken out over {}", horizon_label(horizon))}</span>
+                <span class="stat-label">{format!("Taken out over {}", horizon_label(drawdown))}</span>
                 <span class="stat-value">{fmt_money(out.withdrawn_total)}</span>
             </div>
         }
     });
 
-    // The headline of a drawdown: when the whole portfolio empties within the
-    // horizon, say so plainly. It is the point of the feature, so it sits above
-    // the stat cards rather than as one more number among them.
+    // The headline of a drawdown: when the whole portfolio empties before the
+    // drawdown period is up, say so plainly. It is the point of the feature, so it
+    // sits above the stat cards rather than as one more number among them.
     let depletion_note = out.depletion_month.map(|m| {
         view! {
             <p class="depletion-note" role="note">
                 <strong>{format!("Your money runs out in {}.", month_label(m))}</strong>
-                " Drawing it down empties the portfolio before the end of the projection; \
+                " Drawing it down empties the portfolio before the drawdown period ends; \
                  after that point the value stays at \u{00a3}0."
             </p>
         }
@@ -67,13 +80,14 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
             // The projection leads: it is the question the tool exists to answer,
             // and at the same size as its own inputs it did not read as one.
             <div class="stat stat-accent">
-                <span class="stat-label">{format!("Value in {}", horizon_label(horizon))}</span>
+                <span class="stat-label">{format!("Value in {}", horizon_label(span))}</span>
                 <span class="stat-value">{fmt_money(out.projected_total)}</span>
             </div>
             <div class="stat">
                 <span class="stat-label">"Value today"</span>
                 <span class="stat-value">{fmt_money(out.current_total)}</span>
             </div>
+            {handover_stat}
             {contributions_stat}
             {withdrawals_stat}
             <div class="stat">

@@ -20,22 +20,23 @@ pub fn ResultsPanel(
 }
 
 fn results_view(out: &CalcOutput) -> impl IntoView {
-    let horizon = out.horizon_months;
-    let svg = chart_svg(&out.series, &out.contributions_series);
+    let horizon = out.horizon_months; // the growth period (also the handover index)
+    let drawdown = out.drawdown_months;
+    let span = out.total_months; // the whole timeline the chart and scrubber cover
+    let drawing = out.handover_total.is_some();
+    let handover = drawing.then_some(horizon);
+    let svg = chart_svg(&out.series, &out.contributions_series, handover);
     let has_contributions = !out.contributed_total.is_zero();
     let has_withdrawals = !out.withdrawn_total.is_zero();
-    // Only grow the table with a "Runs dry" column if some holding actually
-    // empties — a percentage draw that merely shrinks the pot never does.
-    let any_depletion = out.investments.iter().any(|r| r.depletion_month.is_some());
 
     // --- scrub state -------------------------------------------------------
-    // The chart plotted 121 points but only ever reported two of them, so
-    // "what is it worth in year four" had no answer. A slider laid over the
-    // plot reads any month out; `active` keeps the marker hidden until the user
-    // is actually pointing at or focused on the chart.
+    // A slider laid over the plot reads any month out; `active` keeps the marker
+    // hidden until the user is actually pointing at or focused on the chart. The
+    // scrubber spans the *whole* timeline, accumulation and drawdown alike.
     let series = store_value(out.series.clone());
     let contribs = store_value(out.contributions_series.clone());
-    let cursor = create_rw_signal(horizon as usize);
+    let withdraws = store_value(out.withdrawals_series.clone());
+    let cursor = create_rw_signal(span as usize);
     let active = create_rw_signal(false);
     let scrub_ref = create_node_ref::<html::Div>();
 
@@ -43,11 +44,25 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
         let i = series.with_value(|s| cursor.get().min(s.len().saturating_sub(1)));
         let value = series.with_value(|s| fmt_money(s[i]));
         let when = month_label(i as u32);
+        // Name the cash flows to date at this point: paid in, and (past the
+        // handover) taken out, so a drawdown month explains where the value went.
+        let mut parts: Vec<String> = Vec::new();
         if has_contributions {
-            let paid = contribs.with_value(|c| fmt_money(c[i]));
-            format!("{when}: {value} \u{2014} {paid} of that paid in")
-        } else {
+            let paid = contribs.with_value(|c| c[i]);
+            if !paid.is_zero() {
+                parts.push(format!("{} paid in", fmt_money(paid)));
+            }
+        }
+        if has_withdrawals {
+            let taken = withdraws.with_value(|w| w[i]);
+            if !taken.is_zero() {
+                parts.push(format!("{} taken out", fmt_money(taken)));
+            }
+        }
+        if parts.is_empty() {
             format!("{when}: {value}")
+        } else {
+            format!("{when}: {value} \u{2014} {}", parts.join(", "))
         }
     };
 
@@ -63,7 +78,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             return;
         }
         let frac = ((x / width) - PLOT_LEFT_FRAC) / PLOT_WIDTH_FRAC;
-        cursor.set((frac.clamp(0.0, 1.0) * horizon as f64).round() as usize);
+        cursor.set((frac.clamp(0.0, 1.0) * span as f64).round() as usize);
     };
 
     let on_key = move |ev: ev::KeyboardEvent| {
@@ -73,19 +88,19 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             // A year at a time is the useful coarse step for this data.
             "PageDown" => -12,
             "PageUp" => 12,
-            "Home" => -(horizon as i64),
-            "End" => horizon as i64,
+            "Home" => -(span as i64),
+            "End" => span as i64,
             _ => return,
         };
         // Stop the arrow keys scrolling the page out from under the chart.
         ev.prevent_default();
         active.set(true);
-        let next = (cursor.get_untracked() as i64 + step).clamp(0, horizon as i64);
+        let next = (cursor.get_untracked() as i64 + step).clamp(0, span as i64);
         cursor.set(next as usize);
     };
 
     let marker_style = move || {
-        let at = cursor.get() as f64 / horizon.max(1) as f64;
+        let at = cursor.get() as f64 / span.max(1) as f64;
         format!(
             "left: {:.4}%; top: {:.4}%; bottom: {:.4}%",
             (PLOT_LEFT_FRAC + at * PLOT_WIDTH_FRAC) * 100.0,
@@ -93,7 +108,17 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             PLOT_BOTTOM_FRAC * 100.0
         )
     };
-    let chart_label = if has_contributions {
+    let chart_label = if drawing {
+        format!(
+            "Line chart of projected portfolio value over {}: growing to {} after {}, \
+             then drawn down to {} over a further {}.",
+            horizon_label(span),
+            fmt_money(out.handover_total.expect("drawing implies a handover total")),
+            horizon_label(horizon),
+            fmt_money(out.projected_total),
+            horizon_label(drawdown),
+        )
+    } else if has_contributions {
         format!(
             "Line chart of projected portfolio value, from {} today to {} in {}, \
              with a second line showing {} of cumulative contributions.",
@@ -116,17 +141,18 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
         .iter()
         .map(|r| {
             // Column order mirrors the arithmetic: what you hold plus what you
-            // add, grown at this rate, lands on the projection. Without the
-            // top-ups cell a row with contributions looks like today's value
-            // grew at `annualised`, which it did not.
+            // add, grown at this rate, reaches the handover pot, from which the
+            // drawdown is taken to land on the projection.
             let contributed = has_contributions.then(|| {
-                // An em dash reads better than "£0.00" for a holding with no
-                // top-ups, and keeps the eye on the rows that do have them.
                 let cell = if r.contributed.is_zero() {
                     "\u{2014}".to_string()
                 } else {
                     fmt_money(r.contributed)
                 };
+                view! { <td class="num">{cell}</td> }
+            });
+            let handover_cell = drawing.then(|| {
+                let cell = r.handover_value.map_or("\u{2014}".to_string(), fmt_money);
                 view! { <td class="num">{cell}</td> }
             });
             let withdrawn = has_withdrawals.then(|| {
@@ -137,26 +163,37 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                 };
                 view! { <td class="num">{cell}</td> }
             });
-            let runs_dry = any_depletion.then(|| {
-                let cell = match r.depletion_month {
-                    Some(m) => month_label(m),
-                    None => "\u{2014}".to_string(),
-                };
-                view! { <td class="num">{cell}</td> }
-            });
             view! {
                 <tr>
                     <td>{r.name.clone()}</td>
                     <td class="num">{fmt_money(r.current_value)}</td>
                     {contributed}
+                    {handover_cell}
                     {withdrawn}
                     <td class="num">{fmt_pct(r.annualised)}</td>
                     <td class="num">{fmt_money(r.projected_value)}</td>
-                    {runs_dry}
                 </tr>
             }
         })
         .collect_view();
+
+    // The caption states the load-bearing assumption behind the drawdown split.
+    let caption = if drawing {
+        "Per holding. \u{201c}Annualised\u{201d} is the equivalent yearly rate. During drawdown the \
+         monthly withdrawal is taken from the whole portfolio, split across holdings in proportion \
+         to their value and rebalanced each month."
+    } else {
+        "Per holding. \u{201c}Annualised\u{201d} is the equivalent yearly rate, projected forward \
+         from each holding\u{2019}s value today."
+    };
+    let caption_label = if drawing {
+        format!("Portfolio value over {} \u{2014} {} of growth, then {} of drawdown.",
+            horizon_label(span), horizon_label(horizon), horizon_label(drawdown))
+    } else if has_contributions {
+        format!("Portfolio value and cumulative contributions from today to {} ahead.", horizon_label(horizon))
+    } else {
+        format!("Portfolio value from today to {} ahead.", horizon_label(horizon))
+    };
 
     view! {
         <figure class="chart-figure">
@@ -177,7 +214,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                          role="slider"
                          aria-label="Read the projection at a point in time"
                          aria-valuemin="0"
-                         aria-valuemax=horizon.to_string()
+                         aria-valuemax=span.to_string()
                          aria-valuenow=move || cursor.get().to_string()
                          aria-valuetext=readout
                          on:pointermove=move |ev| { active.set(true); set_from_x(ev.offset_x() as f64); }
@@ -196,39 +233,27 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                     "Point at the chart, or focus it and use the arrow keys, to read any month.".to_string()
                 }}
             </div>
-            <figcaption class="chart-caption">
-                {if has_contributions {
-                    format!("Portfolio value and cumulative contributions from today to {} ahead.", horizon_label(horizon))
-                } else {
-                    format!("Portfolio value from today to {} ahead.", horizon_label(horizon))
-                }}
-            </figcaption>
+            <figcaption class="chart-caption">{caption_label}</figcaption>
         </figure>
 
         <div class="table-scroll">
             <table class="breakdown">
-                // A `<caption>` rather than a `title` tooltip: the note explains
-                // a derived column ("80% total" shown as "+6.05%"), and a
-                // tooltip would hide that from keyboard and touch users.
-                <caption class="table-note">
-                    "Per holding. \u{201c}Annualised\u{201d} is the equivalent yearly rate \u{2014} \
-                     a return entered as a total over the whole period is converted to it."
-                </caption>
+                <caption class="table-note">{caption}</caption>
                 <thead>
                     <tr>
                         <th scope="col">"Investment"</th>
                         <th scope="col">"Value today"</th>
                         {has_contributions.then(|| view! {
-                            <th scope="col">{format!("Top-ups over {}", horizon_label(horizon))}</th>
+                            <th scope="col">{format!("Deposits over {}", horizon_label(horizon))}</th>
+                        })}
+                        {drawing.then(|| view! {
+                            <th scope="col">"At start of drawdown"</th>
                         })}
                         {has_withdrawals.then(|| view! {
-                            <th scope="col">{format!("Taken out over {}", horizon_label(horizon))}</th>
+                            <th scope="col">{format!("Taken out over {}", horizon_label(drawdown))}</th>
                         })}
                         <th scope="col">"Annualised"</th>
                         <th scope="col">"Projected"</th>
-                        {any_depletion.then(|| view! {
-                            <th scope="col">"Runs dry"</th>
-                        })}
                     </tr>
                 </thead>
                 <tbody>{breakdown}</tbody>

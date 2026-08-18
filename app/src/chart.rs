@@ -100,11 +100,12 @@ fn polyline_points(vals: &[f64], x: impl Fn(f64) -> f64, y: impl Fn(f64) -> f64)
 }
 
 /// Render the projection as an SVG string: `series` is the portfolio value at
-/// month 0..=horizon, `contributions` is the cumulative amount deposited by each
-/// of those months (parallel to `series`). The contributions line is drawn only
-/// when there are actual top-ups, so a portfolio without them keeps a single
-/// clean line. Returns an empty string for an empty series.
-pub fn chart_svg(series: &[Decimal], contributions: &[Decimal]) -> String {
+/// month 0..=total, `contributions` the cumulative amount deposited by each of
+/// those months (parallel to `series`). The contributions line is drawn only when
+/// there are actual top-ups. `handover`, when set, is the month the drawdown phase
+/// begins (an index into `series`); a dashed divider marks it and its month joins
+/// the axis ticks. Returns an empty string for an empty series.
+pub fn chart_svg(series: &[Decimal], contributions: &[Decimal], handover: Option<u32>) -> String {
     let vals: Vec<f64> = series.iter().map(|d| d.to_f64().unwrap_or(0.0)).collect();
     if vals.is_empty() {
         return String::new();
@@ -131,7 +132,11 @@ pub fn chart_svg(series: &[Decimal], contributions: &[Decimal]) -> String {
         .chain(if show_contrib { contrib.iter() } else { [].iter() })
         .cloned()
         .fold(f64::MIN, f64::max);
-    let min_v = vals.iter().cloned().fold(0.0_f64, f64::min);
+    // The baseline is always £0: every series is a sum of non-negative balances
+    // (values non-negative, rates > -100%, withdrawals capped at the pot), so the
+    // minimum is never below zero — and anchoring at £0 is what makes a drawdown
+    // to nothing read as reaching the floor.
+    let min_v = 0.0_f64;
     let span = if (max_v - min_v).abs() < 1e-9 { 1.0 } else { max_v - min_v };
 
     let x = |m: f64| pl + (m / max_m) * plot_w;
@@ -164,16 +169,39 @@ pub fn chart_svg(series: &[Decimal], contributions: &[Decimal]) -> String {
     // of years (>= 2) step in whole years so every label reads "Ny"; otherwise step
     // in months. This avoids the ugly mixed "20m / 5y / 80m" scale.
     let total_m = max_m.round() as u32;
-    let (ticks, use_years) = if total_m >= 24 && total_m % 12 == 0 {
-        (year_ticks(total_m / 12), true)
+    // A handover only draws when it falls strictly inside the plotted span; pin the
+    // boundary rule once so the tick and divider sites can't drift apart.
+    let handover = handover.filter(|&h| h > 0 && h < total_m);
+    let mut ticks = if total_m >= 24 && total_m % 12 == 0 {
+        year_ticks(total_m / 12)
     } else {
-        (month_ticks(total_m), false)
+        month_ticks(total_m)
     };
+    // Make sure the handover month is readable off the axis: replace the *nearest*
+    // regular tick with it rather than adding one, so labels can't collide.
+    if let Some(h) = handover {
+        // Only interior ticks are candidates: overwriting the first or last would
+        // drop the "0" origin or the final-month label, which the handover — being
+        // strictly inside the span — can never stand in for.
+        let last = ticks.len() - 1;
+        if let Some((idx, _)) = ticks
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != 0 && i != last)
+            .min_by_key(|(_, &t)| (t as i64 - h as i64).abs())
+        {
+            ticks[idx] = h;
+        }
+        ticks.sort_unstable();
+        ticks.dedup();
+    }
     let mut x_labels = String::new();
     for &mo in &ticks {
+        // Per-tick unit so a whole-year run reads "Ny" while a stray handover tick
+        // that is not a round year still labels cleanly in months.
         let label = if mo == 0 {
             "0".to_string()
-        } else if use_years {
+        } else if mo % 12 == 0 {
             format!("{}y", mo / 12)
         } else {
             format!("{}m", mo)
@@ -201,6 +229,8 @@ pub fn chart_svg(series: &[Decimal], contributions: &[Decimal]) -> String {
          .y-lbl,.x-lbl,.lgnd{{fill:var(--muted-strong);font-size:{AXIS_FONT}px;font-family:system-ui,sans-serif}}\
          .line{{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round}}\
          .cline{{fill:none;stroke:var(--good);stroke-width:2;stroke-dasharray:5 4;stroke-linejoin:round}}\
+         .phase{{fill:none;stroke:var(--muted-strong);stroke-width:1.5;stroke-dasharray:4 4;opacity:0.7}}\
+         .phase-lbl{{fill:var(--muted-strong);font-size:{AXIS_FONT}px;font-family:system-ui,sans-serif}}\
          </style>"
     ));
     svg.push_str(&grid);
@@ -210,6 +240,19 @@ pub fn chart_svg(series: &[Decimal], contributions: &[Decimal]) -> String {
         svg.push_str(&format!("<polyline points=\"{}\" class=\"cline\"/>", contrib_line));
     }
     svg.push_str(&x_labels);
+    // The handover divider: a dashed vertical rule where drawdown begins, with a
+    // short label near the axis (kept to one word so it can't outgrow the plot).
+    if let Some(h) = handover {
+        let hx = x(h as f64);
+        svg.push_str(&format!(
+            "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" class=\"phase\"/>",
+            hx, pt, hx, pt + plot_h
+        ));
+        svg.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" class=\"phase-lbl\" text-anchor=\"start\">drawdown</text>",
+            hx + 5.0, pt + plot_h - 6.0
+        ));
+    }
     // Legend, top-left of the plot, only when both lines are present.
     if show_contrib {
         let lx = pl + 6.0;
@@ -242,12 +285,12 @@ mod tests {
 
     #[test]
     fn empty_series_yields_empty_string() {
-        assert_eq!(chart_svg(&[], &[]), "");
+        assert_eq!(chart_svg(&[], &[], None), "");
     }
 
     #[test]
     fn renders_well_formed_svg() {
-        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]));
+        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]), None);
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>"));
         assert!(svg.contains("class=\"line\""));
@@ -260,19 +303,19 @@ mod tests {
     #[test]
     fn flat_series_does_not_divide_by_zero() {
         // Equal values give a zero span; must not produce NaN coordinates.
-        let svg = chart_svg(&series(&["500", "500", "500"]), &series(&["0", "0", "0"]));
+        let svg = chart_svg(&series(&["500", "500", "500"]), &series(&["0", "0", "0"]), None);
         assert!(!svg.contains("NaN"));
     }
 
     #[test]
     fn contributions_line_drawn_only_when_non_zero() {
         // No top-ups: single value line, no contributions line or legend.
-        let none = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]));
+        let none = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]), None);
         assert!(!none.contains("class=\"cline\""));
         assert!(!none.contains("Contributions"));
 
         // With top-ups: the dashed contributions line and legend appear.
-        let with = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50", "100"]));
+        let with = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50", "100"]), None);
         assert!(with.contains("class=\"cline\""));
         assert!(with.contains("var(--good)"));
         assert!(with.contains("Contributions"));
@@ -283,8 +326,42 @@ mod tests {
     fn mismatched_contributions_length_is_ignored() {
         // A contributions slice that doesn't parallel the value series is skipped
         // rather than mis-plotted.
-        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50"]));
+        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50"]), None);
         assert!(!svg.contains("class=\"cline\""));
+    }
+
+    #[test]
+    fn handover_divider_drawn_only_in_drawdown() {
+        let flat = series(&["100", "110", "120", "115", "108"]);
+        let zeros = series(&["0", "0", "0", "0", "0"]);
+        // No handover: no phase divider.
+        assert!(!chart_svg(&flat, &zeros, None).contains("class=\"phase\""));
+        // A handover mid-series draws the dashed divider and its label.
+        let dd = chart_svg(&flat, &zeros, Some(2));
+        assert!(dd.contains("class=\"phase\""));
+        assert!(dd.contains("drawdown"));
+        assert!(dd.contains("var(--muted-strong)"));
+    }
+
+    #[test]
+    fn handover_at_the_series_ends_is_not_drawn() {
+        let flat = series(&["100", "110", "120"]);
+        let zeros = series(&["0", "0", "0"]);
+        // 0 and the final index are degenerate: no divider, no NaN, still valid.
+        for h in [0u32, 2] {
+            let svg = chart_svg(&flat, &zeros, Some(h));
+            assert!(!svg.contains("class=\"phase\""), "handover {h} should not draw a divider");
+            assert!(!svg.contains("NaN"));
+            assert!(svg.starts_with("<svg"));
+        }
+    }
+
+    #[test]
+    fn a_drawdown_to_zero_renders_without_nan() {
+        // A pot drawn all the way to £0 must still plot (baseline is £0).
+        let svg = chart_svg(&series(&["1000", "1200", "600", "0"]), &series(&["0", "0", "0", "0"]), Some(1));
+        assert!(!svg.contains("NaN"));
+        assert!(svg.contains("class=\"phase\""));
     }
 
     #[test]

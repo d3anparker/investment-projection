@@ -1,9 +1,9 @@
 //! The shareable-link codec that makes a projection linkable.
 //!
-//! The whole form state — every row, the horizon, and the goal — is serialized
-//! to JSON, base64url-encoded, and carried in the URL *fragment* as `#v=…` so a
-//! projection can be saved, revisited, or shared without a backend or any
-//! storage. A fragment is never sent in the HTTP request, so this keeps the
+//! The whole form state — every row, the periods, the mode and the goal — is
+//! serialized to JSON, base64url-encoded, and carried in the URL *fragment* as
+//! `#v=…` so a projection can be saved, revisited, or shared without a backend or
+//! any storage. A fragment is never sent in the HTTP request, so this keeps the
 //! "nothing leaves this page" property intact; the figures travel only inside a
 //! link the user chooses to copy.
 //!
@@ -26,16 +26,20 @@ pub struct ShareState {
     pub horizon_value: String,
     #[serde(default = "default_horizon_unit")]
     pub horizon_unit: String,
+    /// The top-level mode: `"deposits"` or `"drawdown"`.
+    #[serde(default = "default_plan")]
+    pub plan: String,
+    #[serde(default = "default_drawdown_value")]
+    pub drawdown_value: String,
+    #[serde(default = "default_drawdown_unit")]
+    pub drawdown_unit: String,
+    /// The portfolio-level monthly withdrawal (drawdown mode).
+    #[serde(default)]
+    pub withdrawal: String,
     #[serde(default)]
     pub goal_target: String,
     #[serde(default = "default_goal_kind")]
     pub goal_kind: String,
-    /// What the goal is about: the sentinel `"portfolio"`, or a holding index
-    /// into the filtered rows. Row order is preserved across a share/restore, so
-    /// an index round-trips. Held as the raw picker string so the codec stays
-    /// oblivious to `calc::Scope`.
-    #[serde(default = "default_goal_scope")]
-    pub goal_scope: String,
 }
 
 fn default_horizon_value() -> String {
@@ -44,56 +48,62 @@ fn default_horizon_value() -> String {
 fn default_horizon_unit() -> String {
     "years".into()
 }
+fn default_plan() -> String {
+    "deposits".into()
+}
+fn default_drawdown_value() -> String {
+    "30".into()
+}
+fn default_drawdown_unit() -> String {
+    "years".into()
+}
 fn default_goal_kind() -> String {
     "topup".into()
-}
-fn default_goal_scope() -> String {
-    "portfolio".into()
 }
 
 impl ShareState {
     /// The built-in illustrative projection shown on a bare load — i.e. when the
     /// fragment holds no shared link (or a mangled one that [`decode`] rejects).
-    /// A whole `ShareState` so the caller seeds every signal from one
-    /// source instead of branching between a decoded link and inline defaults.
-    /// The `RowData` ids are placeholders; the caller reassigns them as it builds
-    /// the reactive rows.
+    /// A whole `ShareState` so the caller seeds every signal from one source
+    /// instead of branching between a decoded link and inline defaults. The
+    /// `RowData` ids are placeholders; the caller reassigns them.
     pub fn example() -> ShareState {
-        let row = |id, name: &str, value: &str, mode: &str, rate: &str, contribution: &str| RowData {
+        let row = |id, name: &str, value: &str, rate: &str, contribution: &str| RowData {
             id,
             name: name.into(),
             value: value.into(),
-            mode: mode.into(),
             rate: rate.into(),
             contribution: contribution.into(),
-            flow: "deposit".into(),
         };
         ShareState {
             rows: vec![
-                row(0, "Global Equity Fund", "10000", "annual", "7", "200"),
-                row(1, "Government Bond Fund", "5000", "total", "80", "0"),
+                row(0, "Global Equity Fund", "10000", "7", "200"),
+                row(1, "Government Bond Fund", "5000", "3", "0"),
             ],
             horizon_value: "10".into(),
             horizon_unit: "years".into(),
+            plan: "deposits".into(),
+            drawdown_value: "30".into(),
+            drawdown_unit: "years".into(),
+            withdrawal: String::new(),
             goal_target: String::new(),
             goal_kind: "topup".into(),
-            goal_scope: "portfolio".into(),
         }
     }
 }
 
-/// Version marker embedded in every link, so a future format can be told apart
-/// from this one and an unrecognised version rejected cleanly rather than
-/// misread.
-const VERSION: u32 = 1;
+/// Version marker embedded in every link. Bumped to 2 for the deposits/drawdown
+/// overhaul: a v1 link's per-row `mode`/`flow` have no meaning under the new model
+/// (an old `"total"` rate or `"withdraw"` flow would be misread as an annual rate
+/// or a deposit), so v1 links are rejected outright and fall back to the example
+/// rather than being silently mis-decoded.
+const VERSION: u32 = 2;
 
 /// The name of the fragment parameter the payload rides in (`#v=…`).
 const PARAM: &str = "v";
 
 /// The on-the-wire JSON envelope: the version tag plus the flattened state, so
-/// the JSON reads `{"v":1,"rows":[…],"horizon_value":…}`. A borrowing form for
-/// encoding and an owning one for decoding keep `encode` clone-free while letting
-/// `decode` take ownership of what it parsed.
+/// the JSON reads `{"v":2,"rows":[…],"horizon_value":…}`.
 #[derive(Serialize)]
 struct WireRef<'a> {
     v: u32,
@@ -108,10 +118,7 @@ struct WireOwned {
     state: ShareState,
 }
 
-/// Pack the state into a fragment payload `v=<base64url>` (no leading `#`). The
-/// state is serialized to JSON, then base64url-encoded (no padding) so the whole
-/// payload is a single URL-safe token — no reserved character can leak out and
-/// corrupt the fragment.
+/// Pack the state into a fragment payload `v=<base64url>` (no leading `#`).
 pub fn encode(state: &ShareState) -> String {
     let json = serde_json::to_string(&WireRef { v: VERSION, state })
         .expect("ShareState is always serializable");
@@ -125,7 +132,6 @@ pub fn encode(state: &ShareState) -> String {
 pub fn decode(fragment: &str) -> Option<ShareState> {
     let fragment = fragment.strip_prefix('#').unwrap_or(fragment);
 
-    // Pull the `v` parameter out of the `&`-separated pairs; ignore anything else.
     let payload = fragment
         .split('&')
         .find_map(|pair| pair.strip_prefix("v="))?;
@@ -133,7 +139,7 @@ pub fn decode(fragment: &str) -> Option<ShareState> {
     let json = URL_SAFE_NO_PAD.decode(payload).ok()?;
     let wire: WireOwned = serde_json::from_slice(&json).ok()?;
 
-    // A future format is rejected here rather than half-read as this one.
+    // A different format version is rejected here rather than half-read as this one.
     if wire.v != VERSION {
         return None;
     }
@@ -146,8 +152,6 @@ pub fn decode(fragment: &str) -> Option<ShareState> {
         row.id = i;
     }
 
-    // No rows means nothing to project — treat as absent so the caller loads the
-    // default example instead of an empty form.
     if state.rows.is_empty() {
         return None;
     }
@@ -158,40 +162,30 @@ pub fn decode(fragment: &str) -> Option<ShareState> {
 mod tests {
     use super::*;
 
-    fn row(
-        id: usize,
-        name: &str,
-        value: &str,
-        mode: &str,
-        rate: &str,
-        contribution: &str,
-        flow: &str,
-    ) -> RowData {
+    fn row(id: usize, name: &str, value: &str, rate: &str, contribution: &str) -> RowData {
         RowData {
             id,
             name: name.into(),
             value: value.into(),
-            mode: mode.into(),
             rate: rate.into(),
             contribution: contribution.into(),
-            flow: flow.into(),
         }
     }
 
     fn sample() -> ShareState {
         ShareState {
             rows: vec![
-                row(0, "Global Equity Fund", "10000", "annual", "7", "200", "deposit"),
-                // A withdrawal row so the round-trip exercises `flow`.
-                row(1, "Cash Drawdown", "5000", "annual", "2", "150", "withdraw"),
+                row(0, "Global Equity Fund", "10000", "7", "200"),
+                row(1, "Government Bond Fund", "5000", "3", "0"),
             ],
             horizon_value: "10".into(),
             horizon_unit: "years".into(),
+            plan: "drawdown".into(),
+            drawdown_value: "30".into(),
+            drawdown_unit: "years".into(),
+            withdrawal: "2000".into(),
             goal_target: "500000".into(),
             goal_kind: "topup".into(),
-            // A holding index (not the portfolio default) so the round-trip
-            // actually exercises goal_scope.
-            goal_scope: "1".into(),
         }
     }
 
@@ -206,13 +200,9 @@ mod tests {
     fn encodes_as_a_single_url_safe_v_param() {
         let link = encode(&sample());
         assert!(link.starts_with("v="), "the payload rides in the v param");
-        // base64url alphabet only: no `+`, `/`, `=` padding, or other reserved
-        // characters that would need further escaping in a query string.
         let payload = &link["v=".len()..];
         assert!(
-            payload
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            payload.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
             "payload {payload:?} is not clean base64url"
         );
     }
@@ -220,8 +210,6 @@ mod tests {
     #[test]
     fn round_trips_names_with_delimiters_and_non_ascii() {
         let mut s = sample();
-        // Every reserved delimiter, plus a currency symbol and an emoji — JSON
-        // string escaping and base64 both carry these through untouched.
         s.rows[0].name = "A & B = C ~ D # 50% \u{00a3}\u{00e9}\u{1f4c8}".into();
         let back = decode(&encode(&s)).expect("delimiters survive");
         assert_eq!(back.rows[0].name, s.rows[0].name);
@@ -230,15 +218,12 @@ mod tests {
     #[test]
     fn a_decoded_link_accepts_the_leading_hash_too() {
         let encoded = encode(&sample());
-        // The browser hands back the fragment with its `#`; decode must accept
-        // both forms and read them identically.
         assert_eq!(decode(&format!("#{encoded}")), decode(&encoded));
         assert!(decode(&format!("#{encoded}")).is_some());
     }
 
     #[test]
     fn finds_the_v_param_among_others() {
-        // A hand-built link with extra params still resolves `v`.
         let encoded = encode(&sample());
         let s = decode(&format!("#utm=x&{encoded}&ref=y")).expect("v is found among others");
         assert_eq!(s.rows.len(), 2);
@@ -246,17 +231,20 @@ mod tests {
 
     #[test]
     fn missing_optional_keys_fall_back_to_defaults() {
-        // JSON carrying only the version and a single row — every horizon/goal
-        // key omitted — still decodes via the serde defaults.
+        // A v2 payload with only the version and a bare row — every other key
+        // omitted — still decodes via the serde defaults.
         let payload = URL_SAFE_NO_PAD.encode(
-            r#"{"v":1,"rows":[{"name":"A","value":"1000","mode":"annual","rate":"7","contribution":"0"}]}"#,
+            r#"{"v":2,"rows":[{"name":"A","value":"1000","rate":"7","contribution":"0"}]}"#,
         );
         let s = decode(&format!("v={payload}")).expect("a lone row is valid");
         assert_eq!(s.horizon_value, "10");
         assert_eq!(s.horizon_unit, "years");
+        assert_eq!(s.plan, "deposits");
+        assert_eq!(s.drawdown_value, "30");
+        assert_eq!(s.drawdown_unit, "years");
+        assert_eq!(s.withdrawal, "");
         assert_eq!(s.goal_target, "");
         assert_eq!(s.goal_kind, "topup");
-        assert_eq!(s.goal_scope, "portfolio");
         assert_eq!(s.rows.len(), 1);
         assert_eq!(s.rows[0].name, "A");
     }
@@ -266,29 +254,32 @@ mod tests {
         assert_eq!(decode(""), None);
         assert_eq!(decode("#"), None);
         assert_eq!(decode("not-a-link"), None);
-        // No `v` parameter at all.
         assert_eq!(decode("foo=bar"), None);
-        // Well-formed base64 of non-JSON.
         let junk = URL_SAFE_NO_PAD.encode("not json");
         assert_eq!(decode(&format!("v={junk}")), None);
-        // A future version is rejected cleanly, not half-read as v1.
-        let v2 = URL_SAFE_NO_PAD.encode(
-            r#"{"v":2,"rows":[{"name":"A","value":"1000","mode":"annual","rate":"7","contribution":"0"}]}"#,
+        // A pre-overhaul v1 link (carrying the old mode/flow keys) is rejected
+        // rather than mis-decoded — its rates and directions no longer mean what
+        // they did.
+        let v1 = URL_SAFE_NO_PAD.encode(
+            r#"{"v":1,"rows":[{"name":"A","value":"1000","mode":"total","rate":"80","contribution":"0","flow":"withdraw"}]}"#,
         );
-        assert_eq!(decode(&format!("v={v2}")), None);
+        assert_eq!(decode(&format!("v={v1}")), None);
+        // A future version is likewise rejected cleanly.
+        let v3 = URL_SAFE_NO_PAD.encode(
+            r#"{"v":3,"rows":[{"name":"A","value":"1000","rate":"7","contribution":"0"}]}"#,
+        );
+        assert_eq!(decode(&format!("v={v3}")), None);
     }
 
     #[test]
     fn an_empty_row_list_decodes_to_none() {
-        // Valid JSON, current version, but nothing to project.
-        let payload = URL_SAFE_NO_PAD.encode(r#"{"v":1,"rows":[]}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"v":2,"rows":[]}"#);
         assert_eq!(decode(&format!("v={payload}")), None);
     }
 
     #[test]
     fn ids_are_reassigned_by_position_on_decode() {
         let mut s = sample();
-        // Ids that don't match position; the codec drops and rebuilds them.
         s.rows[0].id = 99;
         s.rows[1].id = 42;
         let back = decode(&encode(&s)).expect("valid link");
@@ -298,11 +289,10 @@ mod tests {
 
     #[test]
     fn the_example_is_a_valid_shareable_state() {
-        // The default projection must itself be a well-formed link (two rows,
-        // inert goal), so seeding from it and sharing it are the same path.
         let ex = ShareState::example();
         assert_eq!(ex.rows.len(), 2);
         assert_eq!(ex.rows[0].name, "Global Equity Fund");
+        assert_eq!(ex.plan, "deposits");
         assert!(ex.goal_target.is_empty(), "the example leaves the goal inert");
         assert_eq!(decode(&encode(&ex)).as_ref(), Some(&ex), "the example round-trips");
     }

@@ -29,8 +29,8 @@ mod share;
 mod summary;
 
 use calc::{calculate, solve, CalcOutput, InvestmentField, Solution};
-use convert::{build_input, RowData};
-use goal::{build_goal, describe, subject_label, GoalKind, PORTFOLIO};
+use convert::{build_input, FormInput, RowData};
+use goal::{build_goal, describe, GoalKind};
 use leptos::leptos_dom::helpers::TimeoutHandle;
 use leptos::*;
 use model::{bind_value, new_row, remove_label, remove_row};
@@ -48,9 +48,8 @@ fn main() {
 }
 
 /// Snapshot the reactive rows down to plain-string [`RowData`], the form the
-/// pure `convert`/`share` layers work in. Shared by the `outcome`/`holdings`/
-/// `solution` memos and the copy-link handler so the field reads live in one
-/// place.
+/// pure `convert`/`share` layers work in. Shared by the `outcome`/`solution`
+/// memos and the copy-link handler so the field reads live in one place.
 fn snapshot(rows: RwSignal<Vec<model::Row>>) -> Vec<RowData> {
     rows.get()
         .iter()
@@ -58,10 +57,8 @@ fn snapshot(rows: RwSignal<Vec<model::Row>>) -> Vec<RowData> {
             id: r.id,
             name: r.name.get(),
             value: r.value.get(),
-            mode: r.mode.get(),
             rate: r.rate.get(),
             contribution: r.contribution.get(),
-            flow: r.flow.get(),
         })
         .collect()
 }
@@ -133,20 +130,25 @@ fn App() -> impl IntoView {
         state
             .rows
             .iter()
-            .map(|r| new_row(counter, &r.name, &r.value, &r.mode, &r.rate, &r.contribution, &r.flow))
+            .map(|r| new_row(counter, &r.name, &r.value, &r.rate, &r.contribution))
             .collect::<Vec<_>>(),
     );
     let horizon_value = create_rw_signal(state.horizon_value);
     let horizon_unit = create_rw_signal(state.horizon_unit);
 
+    // The top-level mode (`"deposits"` / `"drawdown"`) and the drawdown-only
+    // controls it reveals. The growth period above is shared by both modes;
+    // `drawdown_value`/`drawdown_unit`/`withdrawal` only matter while drawing down.
+    let plan_kind = create_rw_signal(state.plan);
+    let drawdown_value = create_rw_signal(state.drawdown_value);
+    let drawdown_unit = create_rw_signal(state.drawdown_unit);
+    let withdrawal = create_rw_signal(state.withdrawal);
+    let is_drawdown = move || plan_kind.get() == "drawdown";
+
     // Goal-seek state. The target is blank in the example, which keeps the
     // feature inert (`build_goal` returns `None`) until the user asks a question.
-    // `goal_scope` is the picker's raw string — the `"portfolio"` sentinel or an
-    // index into the *filtered* investments — the same in both goal kinds, so a
-    // shared goal reopens on the holding (or whole portfolio) it was solved for.
     let goal_target = create_rw_signal(state.goal_target);
     let goal_kind = create_rw_signal(state.goal_kind);
-    let goal_scope = create_rw_signal(state.goal_scope);
 
     // Single source of computed truth. Reading every field's signal here means
     // the projection recomputes whenever any input changes; the memo caches the
@@ -159,89 +161,61 @@ fn App() -> impl IntoView {
     // each still subscribes to whatever signals it reads *through* this closure,
     // so the "form strings -> CalcInput" step lives in exactly one place. (It's a
     // `Copy` closure over `Copy` signal handles, hence reusable across memos.)
-    let build_current =
-        move || build_input(&snapshot(rows), &horizon_value.get(), &horizon_unit.get());
+    // Single source of computed truth: one snapshot of the whole form through the
+    // pure `build_input`. Reading the signals here is what makes the projection
+    // recompute on any edit; the memo caches so `calculate` runs once. A `Copy`
+    // closure over `Copy` signal handles, so it is reusable across the memos.
+    let build_current = move || {
+        build_input(&FormInput {
+            rows: snapshot(rows),
+            horizon_value: horizon_value.get(),
+            horizon_unit: horizon_unit.get(),
+            plan: plan_kind.get(),
+            drawdown_value: drawdown_value.get(),
+            drawdown_unit: drawdown_unit.get(),
+            withdrawal: withdrawal.get(),
+        })
+    };
 
     let outcome = create_memo(move |_| {
         let (input, row_ids) = build_current();
         Outcome { result: calculate(&input), row_ids }
     });
 
-    // The holdings a goal can target: the *filtered* rows the projection sees,
-    // paired with their name for the picker. Index here is the index `calc::solve`
-    // expects, so a blank row dropped upstream never shifts it. `Investment`
-    // stands in for an unnamed holding, matching `build_input`.
-    let holdings = create_memo(move |_| {
-        let (input, _ids) = build_current();
-        input
-            .investments
-            .iter()
-            .enumerate()
-            .map(|(i, inv)| (i, inv.name.clone()))
-            .collect::<Vec<_>>()
-    });
-
-    // Keep a holding-scoped goal inside the (filtered) holdings list. When a row
-    // is blanked or removed the list shrinks; without this, `goal_scope` could
-    // name an index past the end while the `<select>` visually shows a valid
-    // holding, and `solve` would report a spurious "pick a holding". A
-    // `"portfolio"` scope is always valid and left alone. Tracks `holdings` only
-    // (reads `goal_scope` untracked), so it can't loop on its own write.
-    create_effect(move |_| {
-        let n = holdings.with(|h| h.len());
-        if let Ok(i) = goal_scope.get_untracked().parse::<usize>() {
-            if n > 0 && i >= n {
-                goal_scope.set((n - 1).to_string());
-            }
-        }
-    });
-
-    // Drive the scope `<select>`'s selection from `goal_scope` through a node-ref
-    // effect, the same way text inputs use `bind_value`. Removing the selected
-    // holding's `<option>` (a row deletion) makes the browser silently reset the
-    // control to its first entry, and a reactive `selected=` attribute on the
-    // options does not re-assert it; the option set also changes underneath a
-    // holding-scoped shared link at mount, the classic `<select>` binding trap.
-    // Tracking `holdings` re-runs this after the option list is rebuilt, and the
-    // `!=` guard means it writes only when the DOM has actually drifted.
-    let goal_scope_ref = create_node_ref::<html::Select>();
-    create_effect(move |_| {
-        holdings.with(|_| ());
-        let v = goal_scope.get();
-        if let Some(sel) = goal_scope_ref.get() {
-            if sel.value() != v {
-                sel.set_value(&v);
-            }
-        }
-    });
-
     // The goal answer, separate from `outcome` on purpose: a goal that can't be
     // met is not an input error, so it must never mark the form `stale` or dim
-    // the projection panels. `None` when the goal is inert (blank target); else
-    // the solved sentence or the reason it failed, both as plain text.
+    // the projection panels. `None` when the goal is inert; else the solved
+    // sentence or the reason it failed, both as plain text.
     let solution = create_memo(move |_| {
-        let target = goal_target.get();
+        let plan = plan_kind.get();
         let kind = goal_kind.get();
-        // Every goal kind is scoped by the same picker, so all of them subscribe
-        // to `goal_scope`: changing the scope is meant to re-solve the question.
-        let scope = goal_scope.get();
-        // Whether a blank box leaves the goal inert is `build_goal`'s call, not
-        // this memo's — "spend it to nothing" is a real max-withdrawal question
-        // with an empty floor box, so an early return on a blank target here
-        // would silently veto it.
-        let g = build_goal(&kind, &target, &scope)?;
+        let target = goal_target.get();
+        let draw = withdrawal.get();
+        let g = build_goal(&kind, &plan, &target, &draw)?;
         let (input, _ids) = build_current();
         let result: Result<Solution, String> = solve(&input, &g).map_err(|e| e.message);
-        // Name what was solved for, so the answer states its own scope.
-        let subject = holdings.with(|h| subject_label(&scope, h));
-        // A top-up answer is solved *for the projection horizon*, so name that
-        // period. Reuse the months `calc` already derived (via `outcome`) rather
-        // than re-parsing the horizon field here — numbers stay in `calc`. When a
-        // top-up succeeds the same input was valid, so `outcome` is `Ok` too.
-        let horizon = outcome
-            .with(|o| o.result.as_ref().ok().map(|out| format::horizon_label(out.horizon_months)))
-            .unwrap_or_default();
-        Some(describe(&result, &target, &subject, &horizon))
+        // The amount box the answer echoes (the target in deposits mode, the
+        // monthly withdrawal in drawdown mode) plus the two period labels. The
+        // labels come from a projection with the withdrawal neutralised, *not*
+        // `outcome`: a `MaxWithdrawal` answer solves *for* the withdrawal, so it
+        // must still name the drawdown period even when the withdrawal box holds
+        // invalid text — which would error `outcome` and blank the label
+        // ("...to zero over  of drawdown."). Whenever `solve` succeeds the periods
+        // and rows are valid, so this probe is too. Numbers stay in `calc`.
+        let (horizon_lbl, drawdown_lbl) = {
+            let mut probe = input.clone();
+            if let calc::Plan::Drawdown { withdrawal, .. } = &mut probe.plan {
+                *withdrawal = "0".to_string();
+            }
+            calculate(&probe)
+                .ok()
+                .map(|out| {
+                    (format::horizon_label(out.horizon_months), format::horizon_label(out.drawdown_months))
+                })
+                .unwrap_or_default()
+        };
+        let amount = if plan == "drawdown" { draw } else { target };
+        Some(describe(&result, &amount, &horizon_lbl, &drawdown_lbl))
     });
 
     // Hold the last successful projection. Recomputing on every keystroke means
@@ -285,30 +259,20 @@ fn App() -> impl IntoView {
     // sibling button left to step to.
     let add_btn = create_node_ref::<html::Button>();
     let add_row = move |_| {
-        let row = new_row(counter, "", "", "annual", "", "", "deposit");
+        let row = new_row(counter, "", "", "", "");
         rows.update(|v| v.push(row));
     };
     let horizon_ref = bind_value(horizon_value);
-    let goal_ref = bind_value(goal_target);
 
-    // Each `<option>` tests its own value against the current kind, both read
-    // through `GoalKind::parse` so the "unknown/new value -> top-up" default is
-    // decided in one place (the enum), not re-spelled here. Must be per-option
-    // `selected=`, never `prop:value`: in `view!` an element's props are set
-    // before its children mount, so `prop:value` on a `<select>` would run while
-    // there are no `<option>`s to match.
-    let kind_is =
-        move |k: &'static str| move || GoalKind::parse(&goal_kind.get()) == GoalKind::parse(k);
-    // One amount box serves all four kinds, but it means a different thing in
-    // each: a target to reach, a floor to leave behind, or the sum being drawn.
-    // The visible label (and its hint) therefore moves with the picker; the
-    // `for="goal-target"` association is what keeps the accessible name equal to
-    // whatever the label currently reads (WCAG 2.5.3), so no `aria-label`.
-    let goal_label = move || GoalKind::parse(&goal_kind.get()).label();
-    let goal_placeholder = move || GoalKind::parse(&goal_kind.get()).placeholder();
-    // As with the row controls: one read of `outcome`, borrowed, shared by the
-    // three attributes the horizon input's error state drives.
+    // The current goal kind, resolved within the active mode so a kind left over
+    // from the other mode falls back to that mode's default (see `GoalKind::parse`).
+    let current_kind = move || GoalKind::parse(&goal_kind.get(), &plan_kind.get());
+
+    // The form-level controls whose error state comes from a `Field` rather than a
+    // row: one borrowed read of `outcome` each, shared by their three attributes.
     let horizon_bad = create_memo(move |_| outcome.with(|o| o.flags_horizon()));
+    let drawdown_bad = create_memo(move |_| outcome.with(|o| o.flags_drawdown()));
+    let withdrawal_bad = create_memo(move |_| outcome.with(|o| o.flags_withdrawal()));
 
     // "Copy link" confirmation. A discrete click, not a per-keystroke rewrite,
     // so a live region here is safe (it can't talk over typing). Cleared after a
@@ -320,9 +284,12 @@ fn App() -> impl IntoView {
             rows: snapshot(rows),
             horizon_value: horizon_value.get(),
             horizon_unit: horizon_unit.get(),
+            plan: plan_kind.get(),
+            drawdown_value: drawdown_value.get(),
+            drawdown_unit: drawdown_unit.get(),
+            withdrawal: withdrawal.get(),
             goal_target: goal_target.get(),
             goal_kind: goal_kind.get(),
-            goal_scope: goal_scope.get(),
         };
         // Write the fragment with replace_state so the shared link doesn't pile
         // up Back-button history entries. The status is set inside (address-bar
@@ -362,6 +329,27 @@ fn App() -> impl IntoView {
             </div>
 
             <main class="layout">
+                // The top-level mode switch, full-width above the panels. A radio
+                // group (styled as a segmented control), not a tablist: the
+                // holdings editor is shared between modes and stays put, so there
+                // is no tabpanel to control — a radio group is the honest "setting
+                // that reconfigures the form" and gives arrow-key navigation, one
+                // tab stop and "2 of 2, selected" for free. `prop:checked` (not the
+                // `checked` attribute) so it re-drives after user interaction.
+                <fieldset class="mode-switch">
+                    <legend>"What are you planning?"</legend>
+                    <div class="segmented">
+                        <input type="radio" id="mode-deposits" name="mode" value="deposits"
+                               prop:checked=move || !is_drawdown()
+                               on:change=move |_| plan_kind.set("deposits".to_string()) />
+                        <label for="mode-deposits">"Building it up"</label>
+                        <input type="radio" id="mode-drawdown" name="mode" value="drawdown"
+                               prop:checked=is_drawdown
+                               on:change=move |_| plan_kind.set("drawdown".to_string()) />
+                        <label for="mode-drawdown">"Drawing it down"</label>
+                    </div>
+                </fieldset>
+
                 <section class="panel panel-summary" aria-labelledby="projection-h">
                     <h2 id="projection-h">"Projection"</h2>
                     <SummaryPanel displayed=displayed stale=stale/>
@@ -381,8 +369,8 @@ fn App() -> impl IntoView {
                         <div class="inv-head" aria-hidden="true">
                             <span>"Name"</span>
                             <span>"Value today"</span>
-                            <span>"Monthly top-up / withdrawal"</span>
-                            <span>"Return figure"</span>
+                            <span>"Monthly deposit"</span>
+                            <span>"Annual return"</span>
                             <span></span>
                         </div>
                         <For each=move || rows.get() key=|r| r.id children=move |r| {
@@ -428,57 +416,36 @@ fn App() -> impl IntoView {
                                             on:input=move |ev| r.value.set(event_target_value(&ev)) />
                                     </span>
                                 </label>
-                                <div class="fld fld-flow">
-                                    <span class="fld-lbl">"Monthly top-up / withdrawal"</span>
-                                    <div class="flow-control">
-                                        // £ for a cash amount, % for a
-                                        // percentage draw — switched with the
-                                        // flow so the adornment matches what the
-                                        // number means.
-                                        <span class="adorn"
-                                              class:adorn-money=move || r.flow.get() != "withdraw_pct"
-                                              class:adorn-pct=move || r.flow.get() == "withdraw_pct">
-                                            <input
-                                                type="text" inputmode="decimal"
-                                                placeholder="100"
-                                                node_ref=contribution_ref
-                                                aria-label="Monthly amount"
-                                                aria-invalid=move || invalid_attrs(contribution_bad.get()).0
-                                                aria-describedby=move || invalid_attrs(contribution_bad.get()).1
-                                                class:field-invalid=move || contribution_bad.get()
-                                                on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
-                                        </span>
-                                        <select
-                                            aria-label="Whether the monthly amount is paid in, taken out, or a percentage taken out"
-                                            on:change=move |ev| r.flow.set(event_target_value(&ev))>
-                                            <option value="deposit" selected=move || r.flow.get() != "withdraw" && r.flow.get() != "withdraw_pct">"in"</option>
-                                            <option value="withdraw" selected=move || r.flow.get() == "withdraw">"out"</option>
-                                            <option value="withdraw_pct" selected=move || r.flow.get() == "withdraw_pct">"% out"</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <div class="fld fld-return">
-                                    <span class="fld-lbl">"Return figure"</span>
-                                    <div class="return-control">
-                                        <span class="adorn adorn-pct">
-                                            <input
-                                                type="text" inputmode="decimal"
-                                                placeholder="7"
-                                                aria-label="Return percentage"
-                                                node_ref=rate_ref
-                                                aria-invalid=move || invalid_attrs(rate_bad.get()).0
-                                                aria-describedby=move || invalid_attrs(rate_bad.get()).1
-                                                class:field-invalid=move || rate_bad.get()
-                                                on:input=move |ev| r.rate.set(event_target_value(&ev)) />
-                                        </span>
-                                        <select
-                                            aria-label="Return basis: per year or total over the whole period"
-                                            on:change=move |ev| r.mode.set(event_target_value(&ev))>
-                                            <option value="annual" selected=move || r.mode.get() == "annual">"a year"</option>
-                                            <option value="total" selected=move || r.mode.get() == "total">"total"</option>
-                                        </select>
-                                    </div>
-                                </div>
+                                <label class="fld">
+                                    // The label wraps the input, so its visible
+                                    // text *is* the accessible name (WCAG 2.5.3) —
+                                    // no `aria-label` to override the on-screen
+                                    // "Monthly deposit".
+                                    <span class="fld-lbl">"Monthly deposit"</span>
+                                    <span class="adorn adorn-money">
+                                        <input
+                                            type="text" inputmode="decimal"
+                                            placeholder="100"
+                                            node_ref=contribution_ref
+                                            aria-invalid=move || invalid_attrs(contribution_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(contribution_bad.get()).1
+                                            class:field-invalid=move || contribution_bad.get()
+                                            on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
+                                    </span>
+                                </label>
+                                <label class="fld">
+                                    <span class="fld-lbl">"Annual return"</span>
+                                    <span class="adorn adorn-pct">
+                                        <input
+                                            type="text" inputmode="decimal"
+                                            placeholder="7"
+                                            node_ref=rate_ref
+                                            aria-invalid=move || invalid_attrs(rate_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(rate_bad.get()).1
+                                            class:field-invalid=move || rate_bad.get()
+                                            on:input=move |ev| r.rate.set(event_target_value(&ev)) />
+                                    </span>
+                                </label>
                                 <button
                                     class="btn btn-remove"
                                     title=move || remove_label(r, rows)
@@ -508,85 +475,119 @@ fn App() -> impl IntoView {
                         {move || copy_status.get()}
                     </p>
 
-                    <div class="horizon">
-                        <label for="horizon-value">"Project"</label>
-                        <input
-                            id="horizon-value" type="number" min="1" step="1" inputmode="numeric"
-                            node_ref=horizon_ref
-                            aria-invalid=move || invalid_attrs(horizon_bad.get()).0
-                            aria-describedby=move || invalid_attrs(horizon_bad.get()).1
-                            class:field-invalid=move || horizon_bad.get()
-                            on:input=move |ev| horizon_value.set(event_target_value(&ev)) />
-                        <select
-                            aria-label="Projection unit"
-                            on:change=move |ev| horizon_unit.set(event_target_value(&ev))>
-                            <option value="years" selected=move || horizon_unit.get() == "years">"years"</option>
-                            <option value="months" selected=move || horizon_unit.get() == "months">"months"</option>
-                        </select>
-                        <span>"into the future"</span>
+                    // The periods. Row one is shared: the *same* horizon input
+                    // node in both modes (only the surrounding words change), so
+                    // switching mode never rebuilds it and takes focus/caret with
+                    // it. Rows two and three appear only while drawing down.
+                    <div class="periods">
+                        <div class="period-row">
+                            <label for="horizon-value">
+                                {move || if is_drawdown() { "Grow for" } else { "Project" }}
+                            </label>
+                            <input
+                                id="horizon-value" type="number" min="1" step="1" inputmode="numeric"
+                                node_ref=horizon_ref
+                                aria-invalid=move || invalid_attrs(horizon_bad.get()).0
+                                aria-describedby=move || invalid_attrs(horizon_bad.get()).1
+                                class:field-invalid=move || horizon_bad.get()
+                                on:input=move |ev| horizon_value.set(event_target_value(&ev)) />
+                            <select
+                                aria-label="Growth period unit"
+                                on:change=move |ev| horizon_unit.set(event_target_value(&ev))>
+                                <option value="years" selected=move || horizon_unit.get() == "years">"years"</option>
+                                <option value="months" selected=move || horizon_unit.get() == "months">"months"</option>
+                            </select>
+                            <span>{move || if is_drawdown() { "," } else { "into the future" }}</span>
+                        </div>
+
+                        {move || is_drawdown().then(|| {
+                            // Refs created inside the block so a fresh binding
+                            // effect applies the seeded value when it mounts.
+                            let drawdown_ref = bind_value(drawdown_value);
+                            let withdrawal_ref = bind_value(withdrawal);
+                            view! {
+                                <div class="period-row">
+                                    <label for="drawdown-value">"then draw down for"</label>
+                                    <input
+                                        id="drawdown-value" type="number" min="1" step="1" inputmode="numeric"
+                                        node_ref=drawdown_ref
+                                        aria-invalid=move || invalid_attrs(drawdown_bad.get()).0
+                                        aria-describedby=move || invalid_attrs(drawdown_bad.get()).1
+                                        class:field-invalid=move || drawdown_bad.get()
+                                        on:input=move |ev| drawdown_value.set(event_target_value(&ev)) />
+                                    <select
+                                        aria-label="Drawdown period unit"
+                                        on:change=move |ev| drawdown_unit.set(event_target_value(&ev))>
+                                        <option value="years" selected=move || drawdown_unit.get() == "years">"years"</option>
+                                        <option value="months" selected=move || drawdown_unit.get() == "months">"months"</option>
+                                    </select>
+                                </div>
+                                <div class="period-row">
+                                    <label for="withdrawal">"Withdraw"</label>
+                                    <span class="adorn adorn-money">
+                                        <input
+                                            id="withdrawal" type="text" inputmode="decimal"
+                                            placeholder="2000"
+                                            node_ref=withdrawal_ref
+                                            aria-invalid=move || invalid_attrs(withdrawal_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(withdrawal_bad.get()).1
+                                            class:field-invalid=move || withdrawal_bad.get()
+                                            on:input=move |ev| withdrawal.set(event_target_value(&ev)) />
+                                    </span>
+                                    <span>"a month from the whole portfolio"</span>
+                                </div>
+                            }
+                        })}
                     </div>
 
+                    // The goal, mode-aware. Two separate `<select>`s with static
+                    // option sets — never one select whose options swap, which the
+                    // browser resets to its first entry when the selected option is
+                    // destroyed. Only the current mode's select is rendered; both
+                    // write the one `goal_kind` signal.
                     <div class="goal">
-                        <label for="goal-target">{goal_label}</label>
-                        <span class="adorn adorn-money">
-                            <input
-                                id="goal-target" type="text" inputmode="decimal"
-                                placeholder=goal_placeholder
-                                node_ref=goal_ref
-                                on:input=move |ev| goal_target.set(event_target_value(&ev)) />
-                        </span>
-                        // Only the "how long does it last" kind is asking about a
-                        // *recurring* sum, so the row reads "Withdraw £1,500 a
-                        // month — how long it lasts". The other three name a
-                        // one-off figure and would be wrong with it.
-                        {move || GoalKind::parse(&goal_kind.get()).is_recurring().then(|| view! {
-                            <span>"a month"</span>
+                        // The target box belongs to the deposits questions only;
+                        // the drawdown questions read the withdrawal box above.
+                        {move || (!is_drawdown()).then(|| {
+                            let goal_ref = bind_value(goal_target);
+                            view! {
+                                <label for="goal-target">"Reach"</label>
+                                <span class="adorn adorn-money">
+                                    <input
+                                        id="goal-target" type="text" inputmode="decimal"
+                                        placeholder="500,000"
+                                        node_ref=goal_ref
+                                        on:input=move |ev| goal_target.set(event_target_value(&ev)) />
+                                </span>
+                            }
                         })}
-                        // Grouped by direction: reaching a target and drawing one
-                        // down are opposite questions sharing one box, and the
-                        // group labels are what make that legible in the list.
-                        <select
-                            aria-label="What to work out"
-                            on:change=move |ev| goal_kind.set(event_target_value(&ev))>
-                            <optgroup label="Reach a target">
-                                <option value="topup" selected=kind_is("topup")>
-                                    "\u{2014} monthly top-up needed"
-                                </option>
-                                <option value="time" selected=kind_is("time")>
-                                    "\u{2014} time needed"
-                                </option>
-                            </optgroup>
-                            <optgroup label="Draw it down">
-                                <option value="withdrawal" selected=kind_is("withdrawal")>
-                                    "\u{2014} monthly withdrawal you can afford"
-                                </option>
-                                <option value="lasts" selected=kind_is("lasts")>
-                                    "\u{2014} how long it lasts"
-                                </option>
-                            </optgroup>
-                        </select>
-                        <span>"for"</span>
-                        // What the goal is about, shown for *every* kind so the
-                        // scope is a deliberate choice, not inferred from whether a
-                        // picker happens to be visible. "Whole portfolio" is the
-                        // combined total; a holding is tracked on its own. Holding
-                        // options come from the *filtered* investments, so the value
-                        // is the index `solve` expects. The current selection is
-                        // driven by the `goal_scope_ref` effect above, not a
-                        // per-option `selected=` (which the browser drops when the
-                        // option list changes).
-                        <select
-                            node_ref=goal_scope_ref
-                            aria-label="What the goal is about"
-                            on:change=move |ev| goal_scope.set(event_target_value(&ev))>
-                            <option value=PORTFOLIO>"your whole portfolio"</option>
-                            <For
-                                each=move || holdings.get()
-                                key=|(i, name)| (*i, name.clone())
-                                children=move |(i, name)| view! {
-                                    <option value=i.to_string()>{name}</option>
-                                } />
-                        </select>
+                        {move || if is_drawdown() {
+                            view! {
+                                <select
+                                    aria-label="What to work out"
+                                    on:change=move |ev| goal_kind.set(event_target_value(&ev))>
+                                    <option value="withdrawal" selected=move || current_kind() == GoalKind::Withdrawal>
+                                        "\u{2014} monthly withdrawal I can afford"
+                                    </option>
+                                    <option value="lasts" selected=move || current_kind() == GoalKind::Lasts>
+                                        "\u{2014} how long it lasts"
+                                    </option>
+                                </select>
+                            }.into_view()
+                        } else {
+                            view! {
+                                <select
+                                    aria-label="What to work out"
+                                    on:change=move |ev| goal_kind.set(event_target_value(&ev))>
+                                    <option value="topup" selected=move || current_kind() == GoalKind::TopUp>
+                                        "\u{2014} monthly top-up needed"
+                                    </option>
+                                    <option value="time" selected=move || current_kind() == GoalKind::Time>
+                                        "\u{2014} time needed"
+                                    </option>
+                                </select>
+                            }.into_view()
+                        }}
                     </div>
 
                     // Visible immediately and not itself a live region: the

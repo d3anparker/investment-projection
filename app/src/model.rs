@@ -14,28 +14,20 @@ pub struct Row {
     pub id: usize,
     pub name: RwSignal<String>,
     pub value: RwSignal<String>,
-    pub mode: RwSignal<String>,
     pub rate: RwSignal<String>,
     pub contribution: RwSignal<String>,
-    /// The monthly cash-flow direction: `"deposit"`, `"withdraw"`, or
-    /// `"withdraw_pct"`. Drives the amount adornment (£ vs %) and how `calc`
-    /// treats the amount.
-    pub flow: RwSignal<String>,
     /// The row's own remove button. Held here rather than created inside the
     /// `For` body so a *sibling* row's handler can reach it to place focus once
     /// this row is gone — see [`remove_row`].
     pub remove_btn: NodeRef<html::Button>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn new_row(
     counter: StoredValue<usize>,
     name: &str,
     value: &str,
-    mode: &str,
     rate: &str,
     contribution: &str,
-    flow: &str,
 ) -> Row {
     let id = counter.get_value();
     counter.set_value(id + 1);
@@ -43,10 +35,8 @@ pub fn new_row(
         id,
         name: create_rw_signal(name.to_string()),
         value: create_rw_signal(value.to_string()),
-        mode: create_rw_signal(mode.to_string()),
         rate: create_rw_signal(rate.to_string()),
         contribution: create_rw_signal(contribution.to_string()),
-        flow: create_rw_signal(if flow.is_empty() { "deposit".to_string() } else { flow.to_string() }),
         remove_btn: create_node_ref(),
     }
 }

@@ -51,6 +51,14 @@ impl Outcome {
     pub fn flags_horizon(&self) -> bool {
         matches!(self.error().and_then(|e| e.field), Some(Field::Horizon))
     }
+
+    pub fn flags_drawdown(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::Drawdown))
+    }
+
+    pub fn flags_withdrawal(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::Withdrawal))
+    }
 }
 
 /// `aria-invalid`/`aria-describedby` values for a control, or `None` to leave
@@ -66,7 +74,7 @@ pub fn invalid_attrs(flagged: bool) -> (Option<&'static str>, Option<&'static st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use calc::{calculate, CalcInput, InvestmentInput, Mode, Unit};
+    use calc::{calculate, CalcInput, InvestmentInput, Plan, Unit};
 
     fn err_outcome(field: Option<Field>, row_ids: Vec<usize>) -> Outcome {
         Outcome {
@@ -80,13 +88,12 @@ mod tests {
             investments: vec![InvestmentInput {
                 name: "A".into(),
                 value: "1000".into(),
-                mode: Mode::Annual,
                 rate: "7".into(),
                 contribution: "0".into(),
-                flow: calc::Flow::Deposit,
             }],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
+            plan: Plan::Deposits,
         };
         Outcome { result: calculate(&input), row_ids: vec![0] }
     }
@@ -125,6 +132,15 @@ mod tests {
         )
         .flags_horizon());
         assert!(!err_outcome(None, vec![]).flags_horizon());
+    }
+
+    #[test]
+    fn flags_drawdown_and_withdrawal_only_for_their_errors() {
+        assert!(err_outcome(Some(Field::Drawdown), vec![]).flags_drawdown());
+        assert!(!err_outcome(Some(Field::Drawdown), vec![]).flags_withdrawal());
+        assert!(err_outcome(Some(Field::Withdrawal), vec![]).flags_withdrawal());
+        assert!(!err_outcome(Some(Field::Withdrawal), vec![]).flags_drawdown());
+        assert!(!err_outcome(Some(Field::Horizon), vec![]).flags_drawdown());
     }
 
     #[test]

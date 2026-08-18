@@ -134,6 +134,76 @@ body {
     grid-column: 1 / -1;
   }
 
+  /* The mode switch is full-width above every panel, so it reads as switching
+     the whole context rather than one column. */
+  .mode-switch {
+    grid-column: 1 / -1;
+  }
+
+}
+
+/* Top-level mode switch, styled as a segmented control over a radio group.
+   The radios are visually hidden but stay in the tab order and a11y tree
+   (opacity/position, never `display:none`), so the browser's own roving focus
+   and arrow-key navigation carry the interaction. */
+.mode-switch {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.mode-switch legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 5px;
+}
+
+.segmented input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented label {
+  display: inline-block;
+  padding: 8px 18px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  color: var(--muted-strong);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.segmented label:hover {
+  color: var(--text);
+}
+
+.segmented input:checked + label {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* The focus ring rides the label, since the real radio is invisible. */
+.segmented input:focus-visible + label {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .panel {
@@ -213,37 +283,6 @@ table {
   color: var(--muted);
   font-weight: 600;
   margin-bottom: 4px;
-}
-
-.return-control {
-  display: flex;
-  gap: 6px;
-}
-
-.return-control .adorn {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.return-control select {
-  flex: 0 0 auto;
-  width: auto;
-}
-
-/* monthly deposit/withdrawal: same [amount][mode] shape as the return control */
-.flow-control {
-  display: flex;
-  gap: 6px;
-}
-
-.flow-control .adorn {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.flow-control select {
-  flex: 0 0 auto;
-  width: auto;
 }
 
 /* £ / % adornments — cosmetic only, never touch the parsed value */
@@ -453,38 +492,50 @@ input[type="number"]::-webkit-inner-spin-button {
   }
 }
 
-.horizon {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+/* The periods block: the growth period, and (in drawdown mode) the drawdown
+   period and monthly withdrawal, each on its own wrapping row. */
+.periods {
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid var(--line);
   color: var(--muted);
 }
 
-/* Spends the stretched panel's spare height, settling the horizon control at
-   the foot of the form rather than leaving a gap beneath it. Must come *after*
-   the `.horizon` rule above: media queries add no specificity, so source order
-   is what decides between `auto` and the 22px default. Desktop only — stacked,
-   the panels are their content height and `auto` would do nothing. */
+.period-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.period-row + .period-row {
+  margin-top: 10px;
+}
+
+/* Spends the stretched panel's spare height, settling the periods block at the
+   foot of the form rather than leaving a gap beneath it. Must come *after* the
+   `.periods` rule above: media queries add no specificity, so source order is
+   what decides between `auto` and the 22px default. Desktop only. */
 @media (min-width: 960px) {
-  .horizon {
+  .periods {
     margin-top: auto;
   }
 }
 
-.horizon label {
+.period-row label {
   color: var(--text);
   font-weight: 600;
 }
 
-.horizon input {
+.period-row input[type="number"] {
   width: 84px;
 }
 
-.horizon select {
+.period-row .adorn-money input {
+  width: 110px;
+}
+
+.period-row select {
   width: auto;
 }
 
