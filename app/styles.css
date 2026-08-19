@@ -78,7 +78,9 @@ body {
 }
 
 .wrap {
-  max-width: 1180px;
+  /* 1400, not 1180: the summary carries up to six figures and the breakdown a
+     seven-column table, both of which were being squeezed at the old cap. */
+  max-width: 1400px;
   margin: 0 auto;
   padding: 32px 20px 60px;
 }
@@ -118,7 +120,13 @@ body {
 
 @media (min-width: 960px) {
   .layout {
-    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    /* Even columns. The form used to claim 1.35fr on the assumption it needed
+       the room, but its own four inputs were rebalanced to fit a narrower
+       track, while the breakdown has to hold a seven-column money table and
+       the chart at a width where its viewBox-sized labels stay legible. At
+       1.35fr the table overflowed by 183px; even, and under the wider page
+       cap, that is down to ~46px and the deposits table clears entirely. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     /* `stretch`, not `start`: the form is inherently shorter than the
        breakdown, and `start` left the difference as a ragged hole in the page
        background. Stretched, the spare room sits inside the panel — where the
@@ -251,7 +259,7 @@ table {
   letter-spacing: 0.06em;
   color: var(--muted);
   font-weight: 600;
-  padding: 0 8px 8px;
+  padding: 0 6px 8px;
 }
 
 /* investment editor: stacked labelled cards (mobile) → aligned grid (desktop) */
@@ -322,8 +330,17 @@ table {
   .inv-head,
   .inv-row {
     display: grid;
+    /* Name / value today / monthly deposit / annual return / remove. Weighted
+       by how long each field's content runs, except the rate track, which
+       carries a px floor instead of just its share: the `%` adornment and the
+       input padding cost a fixed ~32px, so on its share alone the rate field
+       showed 28px of text at the narrowest two-column window — less than the
+       29px "7.25" needs, let alone the 38px of "12.75". The floor only binds
+       between about 960 and 1010px; wider (and in the single-column layout
+       below 960px) the 1fr share already exceeds it, so the other tracks keep
+       their full width. */
     grid-template-columns:
-      minmax(0, 1.6fr) minmax(0, 0.8fr) minmax(0, 1.5fr) minmax(0, 1.5fr) auto;
+      minmax(0, 1.35fr) minmax(0, 1.35fr) minmax(0, 1.05fr) minmax(78px, 1fr) auto;
     gap: 8px;
     align-items: center;
   }
@@ -625,23 +642,63 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 /* results */
+/* Flex, not an auto-fit grid: the number of cards varies from three to six
+   with the mode and the portfolio, and the headline takes a whole row of its
+   own. A grid sizes its tracks from the container, not from how many cards
+   turned up, so the supporting row kept its full track count and left the
+   unused ones as dead space at the right. Flex-grow shares the row between
+   however many cards there actually are. */
 .summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 22px;
 }
 
 .stat {
+  /* 160px basis: the wrap point, and the width below which a money figure
+     starts to crowd its box. Grows to share whatever the row has spare. */
+  flex: 1 1 160px;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px;
 }
 
+/* The headline gets a row to itself, and the figures that feed it share the
+   row below. Two reasons it is not just a wider card in the same row: its
+   money string runs roughly twice the length of theirs (a nine-figure total at
+   2.15rem is ~330px), and the card count varies from three to six with the
+   mode, so any shared row eventually spills one card onto a second line alone.
+   A hero row plus one shared row is tidy at every count, and the flex row above
+   keeps those cards even whether there are two of them or five.
+
+   No media query needed: below the wrap point the cards stack one per row
+   anyway, so a full-width basis is what the headline already had. */
 .stat-accent {
   background: var(--accent-soft);
   border-color: rgba(79, 140, 255, 0.5);
+  flex-basis: 100%;
+}
+
+/* Between the row breakpoint and the two-column layout there is room for four
+   of the five supporting cards but not the fifth, and flex-grow then inflates
+   that orphan to the whole width of its row. Thirds wrap it 3 + 2 instead.
+   Above 960px the 160px basis already fits all five on one row, so this band
+   is the only place the rule is needed.
+
+   Counted, not applied to every `.stat`: with only four supporting cards the
+   160px basis already fits all four on one row here, and forcing thirds on them
+   re-creates the very orphan this rule exists to remove (3 + 1, the fourth card
+   inflated to full width). `.stat-accent` is always the summary's first child,
+   so `:nth-last-child(6)` means "six cards in total" and `~` reaches exactly the
+   five that follow it. The `.98` on the upper bound closes the sub-pixel gap
+   against the `min-width: 960px` layout query, which a fractional viewport
+   (browser zoom) would otherwise fall into. */
+@media (min-width: 620px) and (max-width: 959.98px) {
+  .stat-accent:nth-last-child(6) ~ .stat {
+    flex-basis: calc(33.333% - 8px);
+  }
 }
 
 .stat-label {
@@ -663,7 +720,7 @@ input[type="number"]::-webkit-inner-spin-button {
 /* The projection is the answer the page exists to give. At the same size as
    the figures that feed it, it did not read as the headline. */
 .stat-accent .stat-value {
-  font-size: clamp(1.6rem, 4vw, 2.15rem);
+  font-size: clamp(1.35rem, 3.2vw, 2.15rem);
   line-height: 1.15;
   letter-spacing: -0.02em;
 }
@@ -716,7 +773,11 @@ input[type="number"]::-webkit-inner-spin-button {
    all share these bounds, which is what keeps the marker on the data. */
 .chart-stage {
   position: relative;
-  min-width: 400px;
+  /* 380, not 400: just under the breakdown column's width at the narrowest
+     two-column window (~960px), so the chart stops scrolling sideways there.
+     Labels render at 22 * 380 / 640 = 13px, still well clear of the ~8px floor
+     that set this band in the first place. */
+  min-width: 380px;
   max-width: 520px;
   margin: 0 auto;
 }
@@ -792,7 +853,8 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 .breakdown td {
-  padding: 8px;
+  padding: 8px 6px;
+  font-size: 0.92rem;
   border-top: 1px solid var(--line);
   font-variant-numeric: tabular-nums;
 }
