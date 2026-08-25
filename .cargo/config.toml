@@ -1,0 +1,5 @@
+# Route wasm test binaries through the wasm-bindgen test runner (headless
+# browser). Trunk drives the release build with `cargo build`, not `cargo test`,
+# so this affects only `cargo test --target wasm32-unknown-unknown`.
+[target.wasm32-unknown-unknown]
+runner = "wasm-bindgen-test-runner"

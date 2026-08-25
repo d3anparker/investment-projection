@@ -33,8 +33,35 @@ jobs:
       # Native (non-WASM) run of calc's decimal tests plus app's format/chart tests.
       - run: cargo test --workspace
 
+  # Headless-browser suite for the App component and its children
+  # (app/tests/ui.rs). ubuntu-latest ships Firefox + geckodriver already, so we
+  # only add the wasm-bindgen test runner. See test.Dockerfile for the local run.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-ui-${{ hashFiles('Cargo.lock') }}
+      # wasm-bindgen-test-runner must match the wasm-bindgen version in
+      # Cargo.lock exactly, or it rejects the module ("schema version mismatch").
+      - name: Install wasm-bindgen-test-runner
+        run: |
+          WB=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2)
+          echo "wasm-bindgen ${WB}"
+          curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WB}/wasm-bindgen-${WB}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xzf- --strip-components=1 -C /usr/local/bin
+      - run: cargo test -p app --target wasm32-unknown-unknown --test ui
+        env:
+          GECKODRIVER: ${{ env.GECKOWEBDRIVER }}/geckodriver
+
   deploy:
-    needs: test
+    needs: [test, ui]
     runs-on: ubuntu-latest
     environment:
       name: github-pages

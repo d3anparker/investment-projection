@@ -19,6 +19,16 @@ pub fn ResultsPanel(
     stale_body(displayed, stale, results_view, empty_view)
 }
 
+/// Map a pointer x-offset (in element pixels) to a month index on the scrubber.
+/// The plot does not start at the element's left edge — the y-axis gutter comes
+/// first — so `x/width` is shifted by [`PLOT_LEFT_FRAC`] and scaled by
+/// [`PLOT_WIDTH_FRAC`] before landing on `0..=span`. Pulled out of the view
+/// closure so this arithmetic is unit-testable without a browser.
+fn month_at_fraction(x: f64, width: f64, span: u32) -> usize {
+    let frac = ((x / width) - PLOT_LEFT_FRAC) / PLOT_WIDTH_FRAC;
+    (frac.clamp(0.0, 1.0) * span as f64).round() as usize
+}
+
 fn results_view(out: &CalcOutput) -> impl IntoView {
     let horizon = out.horizon_months; // the growth period (also the handover index)
     let drawdown = out.drawdown_months;
@@ -77,8 +87,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
         if width <= 0.0 {
             return;
         }
-        let frac = ((x / width) - PLOT_LEFT_FRAC) / PLOT_WIDTH_FRAC;
-        cursor.set((frac.clamp(0.0, 1.0) * span as f64).round() as usize);
+        cursor.set(month_at_fraction(x, width, span));
     };
 
     let on_key = move |ev: ev::KeyboardEvent| {
@@ -267,5 +276,45 @@ fn empty_view() -> impl IntoView {
         <p class="chart-placeholder">
             "Enter an investment to see the projection."
         </p>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::month_at_fraction;
+    use crate::chart::{PLOT_LEFT_FRAC, PLOT_WIDTH_FRAC};
+
+    // A 640px-wide scrubber over a 120-month timeline. The plot occupies the
+    // middle band; the y-axis gutter on the left is dead space.
+    const W: f64 = 640.0;
+    const SPAN: u32 = 120;
+
+    #[test]
+    fn the_plot_left_edge_is_month_zero() {
+        // x at the start of the drawn plot (past the gutter) reads as month 0,
+        // not a negative month.
+        let x = PLOT_LEFT_FRAC * W;
+        assert_eq!(month_at_fraction(x, W, SPAN), 0);
+    }
+
+    #[test]
+    fn the_plot_right_edge_is_the_final_month() {
+        let x = (PLOT_LEFT_FRAC + PLOT_WIDTH_FRAC) * W;
+        assert_eq!(month_at_fraction(x, W, SPAN), SPAN as usize);
+    }
+
+    #[test]
+    fn the_plot_midpoint_is_the_middle_month() {
+        let x = (PLOT_LEFT_FRAC + PLOT_WIDTH_FRAC / 2.0) * W;
+        assert_eq!(month_at_fraction(x, W, SPAN), 60);
+    }
+
+    #[test]
+    fn positions_outside_the_plot_clamp_to_the_ends() {
+        // Anywhere in the left gutter clamps to month 0; past the right edge to span.
+        assert_eq!(month_at_fraction(0.0, W, SPAN), 0);
+        assert_eq!(month_at_fraction(W, W, SPAN), SPAN as usize);
+        assert_eq!(month_at_fraction(-50.0, W, SPAN), 0);
+        assert_eq!(month_at_fraction(W * 2.0, W, SPAN), SPAN as usize);
     }
 }

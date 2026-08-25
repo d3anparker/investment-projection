@@ -22,3 +22,15 @@ web-sys = { version = "0.3", features = ["History", "Location", "Navigator", "Cl
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+# Test-only DOM surface for app/tests/ui.rs. Resolver 2 keeps these dev-dep
+# feature activations out of the `trunk build` graph, so the shipped wasm keeps
+# exactly the web-sys features declared above and no more.
+web-sys = { version = "0.3", features = [
+  "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement",
+  "HtmlButtonElement", "Node", "NodeList", "DomTokenList", "Event", "EventInit",
+  "KeyboardEvent", "KeyboardEventInit", "PointerEvent", "PointerEventInit",
+  "CssStyleDeclaration", "HtmlStyleElement", "Window", "Location",
+] }

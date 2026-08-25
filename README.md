@@ -145,7 +145,10 @@ and Trunk installed:
 ```bash
 ./dev.sh          # trunk serve with live reload on http://localhost:8080
 cargo test -p calc   # run the calculation-core unit tests (native, fast)
-cargo test           # the above plus the format/chart tests in app/
+cargo test           # the above plus the pure app-module tests
+# Headless-browser UI suite for the App component (needs a browser + geckodriver;
+# see test.Dockerfile for the containerised run):
+cargo test -p app --target wasm32-unknown-unknown --test ui
 ```
 
 ## Layout
