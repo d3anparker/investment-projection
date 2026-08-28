@@ -31,7 +31,20 @@ jobs:
             target
           key: cargo-test-${{ hashFiles('Cargo.lock') }}
       # Native (non-WASM) run of calc's decimal tests plus app's format/chart tests.
-      - run: cargo test --workspace
+      # `taxkit/mock` is the fictional tax system `calc` will test against. It is
+      # behind a feature so it never reaches the wasm bundle, which also means
+      # `--workspace` alone would silently skip its tests.
+      - run: cargo test --workspace --features taxkit/mock
+      # The jurisdiction boundary is the crates' central invariant and is
+      # otherwise protected only by someone remembering to run these by hand.
+      # `taxkit` must name no country (mock.rs is a fictional one, on purpose)
+      # and `calc` must never reach `uktax`.
+      - name: taxkit names no jurisdiction
+        run: |
+          ! grep -rniE "isa|sipp|pension|hmrc|scotland|england|£|gbp" taxkit/src \
+            --include=*.rs | grep -v "^taxkit/src/mock.rs"
+      - name: calc does not depend on uktax
+        run: "! cargo tree -p calc | grep -q uktax"
 
   # Headless-browser suite for the App component and its children
   # (app/tests/ui.rs). ubuntu-latest ships Firefox + geckodriver already, so we

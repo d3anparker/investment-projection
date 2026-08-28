@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "calc"]
+members = ["app", "calc", "taxkit", "uktax"]
 
 # Shared across every workspace member; profiles are only honoured in the
 # workspace-root manifest, so they live here rather than in a member crate.

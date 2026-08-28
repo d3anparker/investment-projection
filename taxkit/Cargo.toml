@@ -1,0 +1,14 @@
+[package]
+name = "taxkit"
+version = "0.1.0"
+edition = "2021"
+description = "Jurisdiction-neutral abstraction for taxing withdrawals from investment accounts"
+
+[dependencies]
+rust_decimal = { version = "1", features = ["maths"] }
+
+[features]
+# A flat-rate two-account tax system used by `calc`'s tests. It is the second
+# implementation that keeps the trait honest -- without it the abstraction would
+# be shaped entirely by its single real consumer.
+mock = []
