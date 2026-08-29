@@ -423,14 +423,51 @@ pub struct CalcOutput {
 /// last of those generously — the never-hang contract outranks the last penny.
 const MAX_GREEDY_PASSES: usize = 24;
 
-/// Mutable per-holding state one month of drawdown advances.
+/// One holding, parsed and validated up front, with its monthly growth factor
+/// derived. Built once by [`prepare_holdings`]; the month loop in [`project`]
+/// reads it and never re-parses.
+///
+/// Lifting it to module scope (out of `calculate`) is what lets the goal-seek
+/// solvers prepare the portfolio once and vary only the withdrawal — or, for a
+/// top-up, the deposit — across a bracket search, rather than re-parsing every
+/// input string and recomputing every twelfth root on each probe.
+struct Prepared {
+    name: String,
+    current_value: Decimal,
+    contribution: Decimal,
+    monthly: Decimal,
+    annual: Decimal,
+    /// The account kind this holding sits in, resolved against the active tax
+    /// system's catalogue. `None` on an untaxed projection, where the notion
+    /// does not apply.
+    kind: Option<&'static taxkit::AccountKind>,
+    /// The id as given, echoed back on the result so the UI can label the row
+    /// without re-reading the form. Survives having no catalogue.
+    kind_id: String,
+    cost_basis: Decimal,
+}
+
+/// Mutable per-holding state one month of drawdown advances, alongside a
+/// read-only view of the static per-holding data ([`Prepared`]).
+///
+/// Carrying `prepared` here is what lets the drawdown helpers read a holding's
+/// account kind and rank straight off the ledger, rather than being handed a
+/// parallel `kinds` array kept in lockstep with the mutable slices by hand.
 struct Ledger<'a> {
+    prepared: &'a [Prepared],
     balances: &'a mut [Decimal],
     /// What each holding originally cost, shrinking proportionally as it is
     /// sold. Only consulted for account kinds taxed on the gain.
     basis: &'a mut [Decimal],
     withdrawn: &'a mut [Decimal],
     taxes: &'a mut [Decimal],
+}
+
+impl Ledger<'_> {
+    /// The account kind of holding `j`, read off the static data.
+    fn kind(&self, j: usize) -> Option<&'static taxkit::AccountKind> {
+        self.prepared[j].kind
+    }
 }
 
 /// Map a tax system's failure onto the control the user can go and fix.
@@ -526,25 +563,16 @@ impl Priority {
     }
 }
 
-fn pot_of(
-    kinds: &[Option<&'static taxkit::AccountKind>],
-    led: &Ledger,
-    j: usize,
-) -> Option<Pot> {
-    kinds[j].map(|k| Pot {
+fn pot_of(led: &Ledger, j: usize) -> Option<Pot> {
+    led.kind(j).map(|k| Pot {
         kind: k.id,
         available: led.balances[j],
         cost_basis: led.basis[j],
     })
 }
 
-fn priority_of(
-    session: &Option<Box<dyn TaxSession>>,
-    kinds: &[Option<&'static taxkit::AccountKind>],
-    led: &Ledger,
-    j: usize,
-) -> Priority {
-    let (keep, expiring) = match (session, pot_of(kinds, led, j)) {
+fn priority_of(session: &Option<Box<dyn TaxSession>>, led: &Ledger, j: usize) -> Priority {
+    let (keep, expiring) = match (session, pot_of(led, j)) {
         (Some(s), Some(pot)) => {
             // One ladder build for both figures: `marginal` returns the keep and
             // the headroom together, so a cheapest-first pass does not price the
@@ -554,13 +582,12 @@ fn priority_of(
         }
         _ => (Decimal::ONE, false),
     };
-    Priority { keep, expiring, rank: kinds[j].map_or(0, |k| k.rank), index: j }
+    Priority { keep, expiring, rank: led.kind(j).map_or(0, |k| k.rank), index: j }
 }
 
 /// Take up to `net_wanted` out of one holding and post it to the ledger.
 fn draw_one(
     session: &mut Option<Box<dyn TaxSession>>,
-    kinds: &[Option<&'static taxkit::AccountKind>],
     led: &mut Ledger,
     j: usize,
     net_wanted: Decimal,
@@ -571,7 +598,7 @@ fn draw_one(
         return Ok(Draw::default());
     }
 
-    let drawn = match (session.as_mut(), kinds[j]) {
+    let drawn = match (session.as_mut(), led.prepared[j].kind) {
         (Some(s), Some(k)) => {
             let pot = Pot { kind: k.id, available, cost_basis: led.basis[j] };
             s.draw(&pot, net_wanted, stop).map_err(|e| tax_error(e, Some(j)))?
@@ -609,7 +636,6 @@ fn draw_one(
 /// apportions, so per-row withdrawals still sum exactly to the total.
 fn static_month(
     session: &mut Option<Box<dyn TaxSession>>,
-    kinds: &[Option<&'static taxkit::AccountKind>],
     led: &mut Ledger,
     groups: &[Vec<usize>],
     net_wanted: Decimal,
@@ -641,7 +667,7 @@ fn static_month(
                     .ok_or_else(overflowed)?
             };
             allocated += share;
-            delivered += draw_one(session, kinds, led, *j, share, StopAt::Requirement)?.net;
+            delivered += draw_one(session, led, *j, share, StopAt::Requirement)?.net;
         }
 
         // A member may not have managed its share -- its balance ran out, or tax
@@ -652,7 +678,7 @@ fn static_month(
             if short <= Decimal::ZERO {
                 break;
             }
-            delivered += draw_one(session, kinds, led, *j, short, StopAt::Requirement)?.net;
+            delivered += draw_one(session, led, *j, short, StopAt::Requirement)?.net;
         }
     }
     Ok(delivered)
@@ -674,7 +700,6 @@ fn static_month(
 /// the optimiser, and it had two call sites that had to stay in step by hand.
 fn best_holding(
     session: &Option<Box<dyn TaxSession>>,
-    kinds: &[Option<&'static taxkit::AccountKind>],
     led: &Ledger,
     blocked: &[bool],
 ) -> Option<usize> {
@@ -683,7 +708,7 @@ fn best_holding(
         if blocked.get(j).copied().unwrap_or(false) || led.balances[j] <= Decimal::ZERO {
             continue;
         }
-        let p = priority_of(session, kinds, led, j);
+        let p = priority_of(session, led, j);
         if best.is_none_or(|b| p.beats(&b)) {
             best = Some(p);
         }
@@ -694,7 +719,6 @@ fn best_holding(
 /// Returns the net delivered and whether a rate cap had to be breached.
 fn greedy_month(
     session: &mut Option<Box<dyn TaxSession>>,
-    kinds: &[Option<&'static taxkit::AccountKind>],
     led: &mut Ledger,
     net_wanted: Decimal,
     cap: Option<Decimal>,
@@ -714,9 +738,9 @@ fn greedy_month(
         if remaining <= Decimal::ZERO {
             break;
         }
-        let Some(j) = best_holding(session, kinds, led, blocked) else { break };
+        let Some(j) = best_holding(session, led, blocked) else { break };
 
-        let drawn = draw_one(session, kinds, led, j, remaining, stop)?;
+        let drawn = draw_one(session, led, j, remaining, stop)?;
         delivered += drawn.net;
         if drawn.gross <= Decimal::ZERO {
             // It gave nothing: either the cap shut it out or it is empty. Either
@@ -734,8 +758,8 @@ fn greedy_month(
             if short <= Decimal::ZERO {
                 break;
             }
-            let Some(j) = best_holding(session, kinds, led, &[]) else { break };
-            let drawn = draw_one(session, kinds, led, j, short, StopAt::Requirement)?;
+            let Some(j) = best_holding(session, led, &[]) else { break };
+            let drawn = draw_one(session, led, j, short, StopAt::Requirement)?;
             if drawn.gross <= Decimal::ZERO {
                 break;
             }
@@ -754,17 +778,14 @@ fn greedy_month(
 /// Kinds present in the portfolio but missing from `order` are appended by
 /// catalogue rank rather than rejected: a forgiving rule that adds no new way
 /// for the projection to fail.
-fn groups_by_kind(
-    order: &[String],
-    kinds: &[Option<&'static taxkit::AccountKind>],
-) -> Vec<Vec<usize>> {
-    let id_of = |j: usize| kinds[j].map_or("", |k| k.id);
+fn groups_by_kind(order: &[String], prepared: &[Prepared]) -> Vec<Vec<usize>> {
+    let id_of = |j: usize| prepared[j].kind.map_or("", |k| k.id);
 
     let mut present: Vec<(&'static str, u8)> = Vec::new();
-    for (j, k) in kinds.iter().enumerate() {
+    for (j, p) in prepared.iter().enumerate() {
         let id = id_of(j);
-        if !present.iter().any(|(p, _)| *p == id) {
-            present.push((id, k.map_or(0, |k| k.rank)));
+        if !present.iter().any(|(q, _)| *q == id) {
+            present.push((id, p.kind.map_or(0, |k| k.rank)));
         }
     }
 
@@ -786,135 +807,128 @@ fn groups_by_kind(
 
     sequence
         .into_iter()
-        .map(|id| (0..kinds.len()).filter(|j| id_of(*j) == id).collect())
+        .map(|id| (0..prepared.len()).filter(|j| id_of(*j) == id).collect())
         .collect()
 }
 
 /// Group holdings by annualised return, lowest first: drain the worst
 /// compounder before touching the best. Equal-returning holdings share a group
 /// and are drawn pro-rata, so the order never depends on how rows were typed.
-fn groups_by_return(annuals: &[Decimal]) -> Vec<Vec<usize>> {
-    let mut distinct: Vec<Decimal> = annuals.to_vec();
+fn groups_by_return(prepared: &[Prepared]) -> Vec<Vec<usize>> {
+    let mut distinct: Vec<Decimal> = prepared.iter().map(|p| p.annual).collect();
     distinct.sort();
     distinct.dedup();
     distinct
         .into_iter()
-        .map(|r| (0..annuals.len()).filter(|j| annuals[*j] == r).collect())
+        .map(|r| (0..prepared.len()).filter(|j| prepared[*j].annual == r).collect())
         .collect()
 }
 
-/// Project a portfolio forward. Returns a user-facing message on any invalid
-/// input rather than panicking.
-pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
-    if input.investments.is_empty() {
-        return Err(CalcError::new("Add at least one investment.", None));
-    }
-
-    let hundred = Decimal::from(100u32);
-    let twelve = Decimal::from(12u32);
-
-    let horizon_months = to_months(&input.horizon_value, input.horizon_unit, "The growth period")
+/// The accumulation (growth) period in whole months, validated against the
+/// 1-month floor and the 100-year cap. Shared by [`calculate`] and the goal-seek
+/// solvers so they agree on what a horizon is.
+fn horizon_months_of(input: &CalcInput) -> Result<u32, CalcError> {
+    let h = to_months(&input.horizon_value, input.horizon_unit, "The growth period")
         .map_err(|m| CalcError::new(m, Some(Field::Horizon)))?;
-    if horizon_months < 1 {
-        return Err(CalcError::new(
-            "Enter a growth period of at least 1 month.",
-            Some(Field::Horizon),
-        ));
+    if h < 1 {
+        return Err(CalcError::new("Enter a growth period of at least 1 month.", Some(Field::Horizon)));
     }
-    if horizon_months > MAX_HORIZON_MONTHS {
+    if h > MAX_HORIZON_MONTHS {
         return Err(CalcError::new(
             "The growth period is limited to 100 years (1200 months).",
             Some(Field::Horizon),
         ));
     }
+    Ok(h)
+}
 
-    // The drawdown phase, if any: its length, the portfolio withdrawal taken
-    // each month, and how that withdrawal is apportioned. Deposits mode has none.
-    let default_strategy = Strategy::ProRata;
-    let strategy = match &input.plan {
-        Plan::Deposits => &default_strategy,
-        Plan::Drawdown { strategy, .. } => strategy,
-    };
-    let (drawdown_months, withdrawal) = match &input.plan {
-        Plan::Deposits => (0u32, Decimal::ZERO),
-        Plan::Drawdown { drawdown_value, drawdown_unit, withdrawal, .. } => {
-            let d = to_months(drawdown_value, *drawdown_unit, "The drawdown period")
-                .map_err(|m| CalcError::new(m, Some(Field::Drawdown)))?;
-            if d < 1 {
-                return Err(CalcError::new(
-                    "Enter a drawdown period of at least 1 month.",
-                    Some(Field::Drawdown),
-                ));
-            }
-            if horizon_months as u64 + d as u64 > MAX_HORIZON_MONTHS as u64 {
-                return Err(CalcError::new(
-                    "The growth and drawdown periods together are limited to 100 years (1200 months).",
-                    Some(Field::Drawdown),
-                ));
-            }
-            let w = parse_number(withdrawal)
-                .ok_or_else(|| CalcError::new("Enter a valid monthly withdrawal.", Some(Field::Withdrawal)))?;
-            if w < Decimal::ZERO {
-                return Err(CalcError::new(
-                    "The monthly withdrawal cannot be negative.",
-                    Some(Field::Withdrawal),
-                ));
-            }
-            (d, w)
-        }
-    };
+/// The drawdown period in whole months, validated against the 1-month floor and
+/// the combined 100-year cap.
+fn drawdown_months_of(value: &str, unit: Unit, horizon_months: u32) -> Result<u32, CalcError> {
+    let d = to_months(value, unit, "The drawdown period")
+        .map_err(|m| CalcError::new(m, Some(Field::Drawdown)))?;
+    if d < 1 {
+        return Err(CalcError::new("Enter a drawdown period of at least 1 month.", Some(Field::Drawdown)));
+    }
+    if horizon_months as u64 + d as u64 > MAX_HORIZON_MONTHS as u64 {
+        return Err(CalcError::new(
+            "The growth and drawdown periods together are limited to 100 years (1200 months).",
+            Some(Field::Drawdown),
+        ));
+    }
+    Ok(d)
+}
 
-    // The tax system, if this projection has one. The catalogue is needed even
-    // in deposits mode, because account kinds are validated per row regardless.
-    let catalogue: &'static [taxkit::AccountKind] =
-        input.tax.as_ref().map_or(&[], |t| t.system.account_kinds());
+/// The portfolio-level monthly withdrawal, non-negative. A blank/zero is a legal
+/// flat drawdown.
+fn withdrawal_of(withdrawal: &str) -> Result<Decimal, CalcError> {
+    let w = parse_number(withdrawal)
+        .ok_or_else(|| CalcError::new("Enter a valid monthly withdrawal.", Some(Field::Withdrawal)))?;
+    if w < Decimal::ZERO {
+        return Err(CalcError::new("The monthly withdrawal cannot be negative.", Some(Field::Withdrawal)));
+    }
+    Ok(w)
+}
 
-    // A rate cap belongs to the strategy that carries it, so its errors point at
-    // the strategy control rather than stranding a sentence at the foot of the
-    // form.
-    let rate_cap = match strategy {
+/// The rate cap a [`Strategy::RateCapped`] carries, as a fraction, or `None` for
+/// any other strategy. Its errors point at the strategy control that owns it.
+fn rate_cap_of(strategy: &Strategy) -> Result<Option<Decimal>, CalcError> {
+    match strategy {
         Strategy::RateCapped { max_rate } => {
             let r = parse_or_zero(max_rate).ok_or_else(|| {
                 CalcError::new("Enter a valid rate to cap withdrawals at.", Some(Field::Strategy))
             })? / Decimal::from(100u32);
             if r < Decimal::ZERO {
-                return Err(CalcError::new(
-                    "The rate cap cannot be negative.",
-                    Some(Field::Strategy),
-                ));
+                return Err(CalcError::new("The rate cap cannot be negative.", Some(Field::Strategy)));
             }
-            Some(r)
+            Ok(Some(r))
         }
-        _ => None,
-    };
-
-    let total_months = horizon_months + drawdown_months;
-    let horizon = horizon_months as usize;
-    let total = total_months as usize;
-    let drawing = drawdown_months > 0;
-
-    // Parse and validate every holding up front, deriving its monthly growth
-    // factor. The month loop below is *month-major* (all holdings advance one
-    // month together) because the drawdown split depends on every holding's
-    // current balance at once, so per-holding state can't run in isolation.
-    struct Prepared {
-        name: String,
-        current_value: Decimal,
-        contribution: Decimal,
-        monthly: Decimal,
-        annual: Decimal,
-        /// The account kind this holding sits in, resolved against the active
-        /// tax system's catalogue. `None` on an untaxed projection, where the
-        /// notion does not apply.
-        kind: Option<&'static taxkit::AccountKind>,
-        /// The id as given, echoed back on the result so the UI can label the
-        /// row without re-reading the form. Survives having no catalogue.
-        kind_id: String,
-        cost_basis: Decimal,
+        _ => Ok(None),
     }
-    let mut prepared: Vec<Prepared> = Vec::with_capacity(input.investments.len());
+}
 
-    for (index, inv) in input.investments.iter().enumerate() {
+/// The plan parameters a projection runs under, parsed and validated once. The
+/// strategy is owned (cloned) so a deposits plan can carry the [`Strategy::ProRata`]
+/// default without borrowing a local.
+struct PlanParams {
+    horizon_months: u32,
+    drawdown_months: u32,
+    withdrawal: Decimal,
+    strategy: Strategy,
+    rate_cap: Option<Decimal>,
+}
+
+fn plan_params(input: &CalcInput) -> Result<PlanParams, CalcError> {
+    let horizon_months = horizon_months_of(input)?;
+    let strategy = match &input.plan {
+        Plan::Deposits => Strategy::ProRata,
+        Plan::Drawdown { strategy, .. } => strategy.clone(),
+    };
+    let (drawdown_months, withdrawal) = match &input.plan {
+        Plan::Deposits => (0u32, Decimal::ZERO),
+        Plan::Drawdown { drawdown_value, drawdown_unit, withdrawal, .. } => (
+            drawdown_months_of(drawdown_value, *drawdown_unit, horizon_months)?,
+            withdrawal_of(withdrawal)?,
+        ),
+    };
+    let rate_cap = rate_cap_of(&strategy)?;
+    Ok(PlanParams { horizon_months, drawdown_months, withdrawal, strategy, rate_cap })
+}
+
+/// Parse and validate every holding, deriving its monthly growth factor and
+/// resolving its account kind against `catalogue`. Reads only the investments;
+/// the month loop in [`project`] then never touches an input string again, which
+/// is what lets the solvers prepare once and re-project many times.
+fn prepare_holdings(
+    investments: &[InvestmentInput],
+    catalogue: &'static [taxkit::AccountKind],
+    default_kind: Option<&'static taxkit::AccountKind>,
+) -> Result<Vec<Prepared>, CalcError> {
+    let hundred = Decimal::from(100u32);
+    let twelve = Decimal::from(12u32);
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(investments.len());
+
+    for (index, inv) in investments.iter().enumerate() {
         use InvestmentField::{Contribution, Rate, Value};
         let too_large = |part| CalcError::at(too_large_msg(&inv.name), index, part);
 
@@ -955,18 +969,14 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             .checked_powd(Decimal::ONE / twelve)
             .ok_or_else(|| too_large(Rate))?;
 
-        // Which account this holding sits in. Blank picks the first kind the
-        // system advertises — every system is expected to lead with its untaxed
-        // one, so a portfolio that says nothing about accounts keeps behaving as
-        // it always did.
+        // Which account this holding sits in. Blank picks the system's default
+        // kind — expected to be its untaxed one, so a portfolio that says nothing
+        // about accounts keeps behaving as it always did.
         let wanted = inv.account_kind.trim();
         let kind = if catalogue.is_empty() {
             None
         } else if wanted.is_empty() {
-            // The system's own default (its untaxed kind), asked for rather than
-            // presumed to be ordinal 0 — the one place `calc` would otherwise
-            // bake in a contract about catalogue ordering it cannot enforce.
-            input.tax.as_ref().and_then(|t| t.system.default_account_kind())
+            default_kind
         } else {
             Some(catalogue.iter().find(|k| k.id == wanted).ok_or_else(|| {
                 CalcError::at(
@@ -1012,8 +1022,96 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             cost_basis,
         });
     }
+    Ok(prepared)
+}
 
+/// Open the tax session a projection needs, or `None` when it needs none.
+///
+/// Pro-rata never opens one — that is what keeps it byte-identical to the untaxed
+/// model. `PreserveGrowth` uses one if a tax context is present but does not
+/// require it (it orders by return); the tax-aware orders require one and say so
+/// when it is missing.
+fn open_if_ordered(
+    tax: &Option<TaxContext>,
+    strategy: &Strategy,
+    drawing: bool,
+) -> Result<Option<Box<dyn TaxSession>>, CalcError> {
+    if !(drawing && *strategy != Strategy::ProRata) {
+        return Ok(None);
+    }
+    match tax {
+        Some(t) => Ok(Some(open_session(t)?)),
+        None if strategy.needs_tax() => Err(CalcError::new(
+            "This withdrawal order needs to know how the accounts are taxed. \
+             Fill in the tax details, or split the withdrawal pro-rata instead.",
+            Some(Field::Strategy),
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The fixed month-by-month draw order a static strategy uses, worked out once.
+/// Empty for pro-rata and the dynamic (greedy) orders, which do not group.
+fn groups_for(strategy: &Strategy, prepared: &[Prepared]) -> Vec<Vec<usize>> {
+    match strategy {
+        Strategy::Ordered { order } => groups_by_kind(order, prepared),
+        Strategy::PreserveGrowth => groups_by_return(prepared),
+        _ => Vec::new(),
+    }
+}
+
+/// The raw output of one month-by-month run, before any rounding or per-row
+/// assembly. [`calculate`] rounds it into a [`CalcOutput`]; the goal-seek solvers
+/// read only `totals`/`depletion_month` and skip that assembly entirely.
+struct Run {
+    /// Raw (unrounded) portfolio total at each month `0..=total`.
+    totals: Vec<Decimal>,
+    /// Raw cumulative deposits / withdrawals / tax, parallel to `totals`.
+    contribs: Vec<Decimal>,
+    withdraws: Vec<Decimal>,
+    taxed: Vec<Decimal>,
+    /// Final per-holding balance and cumulative flows.
+    balances: Vec<Decimal>,
+    contributed: Vec<Decimal>,
+    withdrawn: Vec<Decimal>,
+    taxes: Vec<Decimal>,
+    handover: Vec<Option<Decimal>>,
+    row_depletion: Vec<Option<u32>>,
+    contributed_total: Decimal,
+    withdrawn_total: Decimal,
+    tax_total: Decimal,
+    depletion_month: Option<u32>,
+    accounts_touched: Vec<usize>,
+    period_months: Option<u32>,
+    rate_cap_breached: bool,
+}
+
+/// Advance the whole portfolio month by month across both phases.
+///
+/// Pure of input parsing (its holdings arrive already validated in `prepared`)
+/// and of output rounding (it returns raw `Decimal`s). The month loop is
+/// *month-major* — all holdings advance one month together — because the drawdown
+/// split depends on every holding's current balance at once, so per-holding state
+/// cannot run in isolation.
+///
+/// The `session` is borrowed mutably so the caller retains it afterwards for the
+/// unused-allowance and rules-label figures the ledger holds.
+fn project(
+    prepared: &[Prepared],
+    horizon_months: u32,
+    drawdown_months: u32,
+    withdrawal: Decimal,
+    strategy: &Strategy,
+    groups: &[Vec<usize>],
+    rate_cap: Option<Decimal>,
+    session: &mut Option<Box<dyn TaxSession>>,
+) -> Result<Run, CalcError> {
     let n = prepared.len();
+    let horizon = horizon_months as usize;
+    let total = (horizon_months + drawdown_months) as usize;
+    let drawing = drawdown_months > 0;
+    let ordered = drawing && *strategy != Strategy::ProRata;
+
     // Per-holding running balance and cumulative cash flow.
     let mut balances: Vec<Decimal> = prepared.iter().map(|p| p.current_value).collect();
     let mut basis: Vec<Decimal> = prepared.iter().map(|p| p.cost_basis).collect();
@@ -1027,37 +1125,6 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     // deposits: it starts at zero, and its value today says nothing about
     // whether it later had something to run out of.
     let mut ever_held: Vec<bool> = vec![false; n];
-
-    let kinds: Vec<Option<&'static taxkit::AccountKind>> =
-        prepared.iter().map(|p| p.kind).collect();
-    let annuals: Vec<Decimal> = prepared.iter().map(|p| p.annual).collect();
-
-    // An ordered strategy needs to know what a draw costs. Pro-rata never opens
-    // a session at all, which is what keeps it byte-identical to the untaxed
-    // model; `PreserveGrowth` will use one if there is one but does not need it,
-    // because it orders by return rather than by tax.
-    let ordered = drawing && *strategy != Strategy::ProRata;
-    let mut session: Option<Box<dyn TaxSession>> = None;
-    if ordered {
-        match &input.tax {
-            Some(tax) => session = Some(open_session(tax)?),
-            None if strategy.needs_tax() => {
-                return Err(CalcError::new(
-                    "This withdrawal order needs to know how the accounts are taxed. \
-                     Fill in the tax details, or split the withdrawal pro-rata instead.",
-                    Some(Field::Strategy),
-                ))
-            }
-            None => {}
-        }
-    }
-
-    // Static orders are the same every month, so they are worked out once.
-    let groups: Vec<Vec<usize>> = match strategy {
-        Strategy::Ordered { order } => groups_by_kind(order, &kinds),
-        Strategy::PreserveGrowth => groups_by_return(&annuals),
-        _ => Vec::new(),
-    };
 
     // The tax period's length is the tax system's to state; an untaxed
     // projection has none, and manufactures no fiscal years to bucket by. The
@@ -1165,6 +1232,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
 
             before.copy_from_slice(&balances);
             let mut led = Ledger {
+                prepared,
                 balances: &mut balances,
                 basis: &mut basis,
                 withdrawn: &mut withdrawn,
@@ -1172,17 +1240,10 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             };
             match strategy {
                 Strategy::Ordered { .. } | Strategy::PreserveGrowth => {
-                    static_month(&mut session, &kinds, &mut led, &groups, withdrawal)?;
+                    static_month(session, &mut led, groups, withdrawal)?;
                 }
                 _ => {
-                    let (_, breached) = greedy_month(
-                        &mut session,
-                        &kinds,
-                        &mut led,
-                        withdrawal,
-                        rate_cap,
-                        &mut blocked,
-                    )?;
+                    let (_, breached) = greedy_month(session, &mut led, withdrawal, rate_cap, &mut blocked)?;
                     rate_cap_breached |= breached;
                 }
             }
@@ -1242,15 +1303,6 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         }
     }
 
-    let series: Vec<Decimal> = totals.iter().map(|v| round2(*v)).collect();
-    let contributions_series: Vec<Decimal> = contribs.iter().map(|v| round2(*v)).collect();
-    let withdrawals_series: Vec<Decimal> = withdraws.iter().map(|v| round2(*v)).collect();
-    let current_total = round2(*totals.first().expect("horizon >= 1 guarantees a point"));
-    let projected_total = round2(*totals.last().expect("horizon >= 1 guarantees a point"));
-    let handover_total = if drawing { Some(round2(totals[horizon])) } else { None };
-    let contributed_total = round2(contributed_total);
-    let withdrawn_total = round2(withdrawn_total);
-
     // The whole portfolio "runs out" only when its combined total actually hits
     // zero *having held something first*. Scan the **unrounded** totals from the
     // first month there was anything to spend, rather than gating on month zero:
@@ -1272,6 +1324,96 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     if ordered {
         accounts_touched.push(period_kinds.len());
     }
+
+    Ok(Run {
+        totals,
+        contribs,
+        withdraws,
+        taxed,
+        balances,
+        contributed,
+        withdrawn,
+        taxes,
+        handover,
+        row_depletion,
+        contributed_total,
+        withdrawn_total,
+        tax_total,
+        depletion_month,
+        accounts_touched,
+        period_months,
+        rate_cap_breached,
+    })
+}
+
+/// Project a portfolio forward. Returns a user-facing message on any invalid
+/// input rather than panicking.
+pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
+    if input.investments.is_empty() {
+        return Err(CalcError::new("Add at least one investment.", None));
+    }
+
+    let pp = plan_params(input)?;
+
+    // The tax system's account catalogue, needed even in deposits mode because
+    // account kinds are validated per row regardless. Blank picks the system's
+    // own default kind.
+    let catalogue: &'static [taxkit::AccountKind] =
+        input.tax.as_ref().map_or(&[], |t| t.system.account_kinds());
+    let default_kind = input.tax.as_ref().and_then(|t| t.system.default_account_kind());
+    let prepared = prepare_holdings(&input.investments, catalogue, default_kind)?;
+
+    let horizon_months = pp.horizon_months;
+    let drawdown_months = pp.drawdown_months;
+    let total_months = horizon_months + drawdown_months;
+    let horizon = horizon_months as usize;
+    let drawing = drawdown_months > 0;
+
+    // Open the session (retained past the run for its allowance/rules figures)
+    // and settle the static draw order, then run the month loop.
+    let mut session = open_if_ordered(&input.tax, &pp.strategy, drawing)?;
+    let groups = groups_for(&pp.strategy, &prepared);
+    let Run {
+        totals,
+        contribs,
+        withdraws,
+        taxed,
+        balances,
+        contributed,
+        withdrawn,
+        taxes,
+        handover,
+        row_depletion,
+        contributed_total,
+        withdrawn_total,
+        tax_total,
+        depletion_month,
+        accounts_touched,
+        period_months,
+        rate_cap_breached,
+    } = project(
+        &prepared,
+        horizon_months,
+        drawdown_months,
+        pp.withdrawal,
+        &pp.strategy,
+        &groups,
+        pp.rate_cap,
+        &mut session,
+    )?;
+
+    let series: Vec<Decimal> = totals.iter().map(|v| round2(*v)).collect();
+    let contributions_series: Vec<Decimal> = contribs.iter().map(|v| round2(*v)).collect();
+    let withdrawals_series: Vec<Decimal> = withdraws.iter().map(|v| round2(*v)).collect();
+    let current_total = round2(*totals.first().expect("horizon >= 1 guarantees a point"));
+    let projected_total = round2(*totals.last().expect("horizon >= 1 guarantees a point"));
+    let handover_total = if drawing { Some(round2(totals[horizon])) } else { None };
+    let contributed_total = round2(contributed_total);
+    let withdrawn_total = round2(withdrawn_total);
+
+    // `depletion_month`, `accounts_touched` and `period_months` all come off the
+    // `Run` above — the month loop that produces them lives in `project` now.
+    //
     // Only reported when a session actually priced something. A pro-rata run
     // ignores tax entirely, so advertising which tax year it used would imply a
     // calculation it never did -- and it is what keeps pro-rata byte-identical
@@ -1453,15 +1595,14 @@ fn parse_target(target: &str) -> Result<Decimal, CalcError> {
     Ok(t)
 }
 
-/// Spread a monthly deposit of `amount` evenly across `investments`: each row's
-/// `contribution` becomes `amount / len`. A single holding takes the whole
-/// amount. The one place the "a portfolio top-up is shared equally" convention
-/// lives.
-fn spread_deposit(investments: &mut [InvestmentInput], amount: Decimal) {
-    let each = amount / Decimal::from(investments.len());
-    for inv in investments {
-        inv.contribution = each.to_string();
-    }
+/// Prepare a projection's holdings once, exactly as [`calculate`] does before
+/// its own run, so a solver can re-`project` them across a bracket search without
+/// re-parsing every input string and recomputing every twelfth root per probe.
+fn prepare_for(input: &CalcInput) -> Result<Vec<Prepared>, CalcError> {
+    let catalogue: &'static [taxkit::AccountKind] =
+        input.tax.as_ref().map_or(&[], |t| t.system.account_kinds());
+    let default_kind = input.tax.as_ref().and_then(|t| t.system.default_account_kind());
+    prepare_holdings(&input.investments, catalogue, default_kind)
 }
 
 /// A deposits-only clone of `input` over the 100-year cap — the base for both
@@ -1477,24 +1618,32 @@ fn long_deposits(input: &CalcInput) -> CalcInput {
     }
 }
 
-/// The portfolio value a candidate monthly top-up reaches over the *user's*
-/// horizon, as a deposit split evenly across the holdings. Rises monotonically
-/// with `top_up`, which is what lets the bracket search converge.
-fn projected_under(input: &CalcInput, top_up: Decimal) -> Result<Decimal, CalcError> {
-    let mut probe = input.clone();
-    probe.plan = Plan::Deposits; // a top-up is a deposit, whatever mode we came from
-    spread_deposit(&mut probe.investments, top_up);
-    Ok(calculate(&probe)?.projected_total)
-}
-
-/// Bisection on the monthly top-up. `projected_under` rises monotonically with
+/// Bisection on the monthly top-up. The projected value rises monotonically with
 /// the top-up, so a doubling bracket plus binary search converges on the least
 /// top-up that reaches the target.
 fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> {
     let target = parse_target(target)?;
     require_holdings(input)?;
 
-    let projected_with = |top_up: Decimal| projected_under(input, top_up);
+    // Prepare once; each probe only overwrites the deposit and re-projects, so
+    // the bracket search never re-parses a string or recomputes a twelfth root.
+    let horizon_months = horizon_months_of(input)?;
+    let mut prepared = prepare_for(input)?;
+    let n = Decimal::from(prepared.len());
+
+    // The portfolio value a candidate monthly top-up reaches over the user's
+    // horizon, spread evenly across the holdings ("a portfolio top-up is shared
+    // equally"). Deposits-only — no drawdown, no session — whatever mode the
+    // input came from, because a top-up is a deposit.
+    let mut projected_with = |top_up: Decimal| -> Result<Decimal, CalcError> {
+        let each = top_up / n;
+        for p in prepared.iter_mut() {
+            p.contribution = each;
+        }
+        let mut session: Option<Box<dyn TaxSession>> = None;
+        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::ProRata, &[], None, &mut session)?;
+        Ok(round2(*run.totals.last().expect("horizon >= 1 guarantees a point")))
+    };
 
     if projected_with(Decimal::ZERO)? >= target {
         return Ok(Solution::AlreadyMet);
@@ -1556,23 +1705,6 @@ fn solve_time(input: &CalcInput, target: &str) -> Result<Solution, CalcError> {
     }
 }
 
-/// Clone `input` with the drawdown withdrawal set to `w`, keeping its accumulation
-/// horizon and drawdown period. The primitive both drawdown solvers probe.
-fn with_withdrawal(input: &CalcInput, w: Decimal) -> Result<CalcInput, CalcError> {
-    // Clone and overwrite the one field that varies, rather than re-listing
-    // every other: a new `CalcInput` or `Plan::Drawdown` field would otherwise
-    // have to be threaded through here to avoid being silently dropped.
-    let mut probe = input.clone();
-    let Plan::Drawdown { withdrawal, .. } = &mut probe.plan else {
-        return Err(CalcError::new(
-            "This goal only applies while drawing the portfolio down.",
-            None,
-        ));
-    };
-    *withdrawal = w.to_string();
-    Ok(probe)
-}
-
 /// Bisection on the monthly withdrawal: the largest draw that still leaves the
 /// portfolio solvent to the end of the drawdown period (i.e. reaches £0 no sooner
 /// than the final month). Feasibility is downward-closed — drawing less is always
@@ -1580,22 +1712,35 @@ fn with_withdrawal(input: &CalcInput, w: Decimal) -> Result<CalcInput, CalcError
 /// answer is rounded down.
 fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
     require_holdings(input)?;
+    let Plan::Drawdown { drawdown_value, drawdown_unit, strategy, .. } = &input.plan else {
+        return Err(CalcError::new("This goal only applies while drawing the portfolio down.", None));
+    };
+    // Parse and prepare once; each probe below only varies the withdrawal.
+    let horizon_months = horizon_months_of(input)?;
+    let drawdown_months = drawdown_months_of(drawdown_value, *drawdown_unit, horizon_months)?;
+    let rate_cap = rate_cap_of(strategy)?;
+    let prepared = prepare_for(input)?;
+    let groups = groups_for(strategy, &prepared);
+
+    // Re-project the pre-parsed holdings under a candidate withdrawal. Each probe
+    // opens a fresh session — cheap next to the month loop — and skips the series
+    // rounding and per-row assembly a full `CalcOutput` would carry.
+    let run_with = |w: Decimal| -> Result<Run, CalcError> {
+        let mut session = open_if_ordered(&input.tax, strategy, true)?;
+        project(&prepared, horizon_months, drawdown_months, w, strategy, &groups, rate_cap, &mut session)
+    };
+    // A draw is feasible if it survives the whole drawdown period without the
+    // portfolio ever hitting £0.
+    let feasible = |w: Decimal| -> Result<bool, CalcError> { Ok(run_with(w)?.depletion_month.is_none()) };
 
     // The pot at the start of drawdown, drawing nothing. If it is already empty
     // there is nothing to spend down.
-    let base = calculate(&with_withdrawal(input, Decimal::ZERO)?)?;
-    if base.handover_total.is_some_and(|p| p <= Decimal::ZERO) {
+    if round2(run_with(Decimal::ZERO)?.totals[horizon_months as usize]) <= Decimal::ZERO {
         return Err(CalcError::new(
             "The portfolio has nothing left to draw down at the end of the growth period.",
             None,
         ));
     }
-
-    // A draw is feasible if it survives the whole drawdown period without the
-    // portfolio ever hitting £0.
-    let feasible = |w: Decimal| -> Result<bool, CalcError> {
-        Ok(calculate(&with_withdrawal(input, w)?)?.depletion_month.is_none())
-    };
 
     if !feasible(Decimal::ZERO)? {
         return Err(CalcError::new(
@@ -1633,7 +1778,7 @@ fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
         }
     }
 
-    // Round down, then settle the last penny against `calculate` itself: step up
+    // Round down, then settle the last penny against `project` itself: step up
     // while the next penny still holds. Bounded regardless — the never-hang
     // contract outranks the extra penny.
     let mut answer = lo.round_dp_with_strategy(2, RoundingStrategy::ToZero);
@@ -1668,40 +1813,28 @@ fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
 
 /// How long the drawdown withdrawal lasts. Re-projects the drawdown over the
 /// whole remaining span to the 100-year cap (the pot may outlast the period on
-/// screen), reads the month the portfolio first hits £0 off [`calculate`], and
-/// reports it relative to the *start of drawdown*.
+/// screen), reads the month the portfolio first hits £0, and reports it relative
+/// to the *start of drawdown*.
 fn solve_time_to_deplete(input: &CalcInput) -> Result<Solution, CalcError> {
     require_holdings(input)?;
+    let Plan::Drawdown { withdrawal, strategy, .. } = &input.plan else {
+        return Err(CalcError::new("This goal only applies while drawing the portfolio down.", None));
+    };
 
-    let horizon_months = to_months(&input.horizon_value, input.horizon_unit, "The growth period")
-        .map_err(|m| CalcError::new(m, Some(Field::Horizon)))?;
+    let horizon_months = horizon_months_of(input)?;
     // No room left to draw down within the cap: nothing can run out.
     if horizon_months >= MAX_HORIZON_MONTHS {
         return Ok(Solution::NeverDepletes);
     }
+    // Project the user's withdrawal over the long span. Only the period is
+    // lengthened; a blank/zero draw never depletes.
     let span = MAX_HORIZON_MONTHS - horizon_months;
-
-    // Project the *user's* withdrawal over the long span. `with_withdrawal`
-    // carries the plan's withdrawal through unchanged; we only lengthen the
-    // period. A blank/zero draw never depletes.
-    let long = CalcInput {
-        investments: input.investments.clone(),
-        horizon_value: input.horizon_value.clone(),
-        horizon_unit: input.horizon_unit,
-        plan: match &input.plan {
-            Plan::Drawdown { withdrawal, strategy, .. } => Plan::Drawdown {
-                drawdown_value: span.to_string(),
-                drawdown_unit: Unit::Months,
-                withdrawal: withdrawal.clone(),
-                strategy: strategy.clone(),
-            },
-            Plan::Deposits => {
-                return Err(CalcError::new("This goal only applies while drawing the portfolio down.", None))
-            }
-        },
-        tax: input.tax.clone(),
-    };
-    let out = calculate(&long)?;
+    let withdrawal = withdrawal_of(withdrawal)?;
+    let rate_cap = rate_cap_of(strategy)?;
+    let prepared = prepare_for(input)?;
+    let groups = groups_for(strategy, &prepared);
+    let mut session = open_if_ordered(&input.tax, strategy, true)?;
+    let out = project(&prepared, horizon_months, span, withdrawal, strategy, &groups, rate_cap, &mut session)?;
 
     Ok(match out.depletion_month {
         Some(m) => Solution::Depletes(m - horizon_months),
