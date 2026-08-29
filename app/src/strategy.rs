@@ -213,8 +213,12 @@ fn row_for(label: String, strategy: &Strategy, out: &CalcOutput) -> Comparison {
 pub fn StrategyPanel(rows: Memo<Vec<Comparison>>) -> impl IntoView {
     view! {
         {move || {
-            let rows = rows.get();
-            (!rows.is_empty()).then(|| view! {
+            // Borrow the memo rather than `get()`-cloning the whole `Vec` (each
+            // `Comparison` carries several strings): the rows are consumed to
+            // build `<tr>`s here and never escape the closure, so a shared
+            // reference is enough. Cloning stays where it is unavoidable — the
+            // per-row strings that move into the DOM.
+            rows.with(|rows| (!rows.is_empty()).then(|| view! {
                 <div class="strategy-compare">
                     <div class="table-scroll">
                         <table class="breakdown">
@@ -258,27 +262,27 @@ pub fn StrategyPanel(rows: Memo<Vec<Comparison>>) -> impl IntoView {
                                 </tr>
                             </thead>
                             <tbody>
-                                {rows.into_iter().map(|r| view! {
+                                {rows.iter().map(|r| view! {
                                     <tr>
-                                        <th scope="row" title=r.hint>
-                                            {r.label}
-                                            {r.problem.map(|p| view! {
+                                        <th scope="row" title=r.hint.clone()>
+                                            {r.label.clone()}
+                                            {r.problem.clone().map(|p| view! {
                                                 <span class="strategy-note">{p}</span>
                                             })}
                                         </th>
-                                        <td class="num">{r.tax}</td>
-                                        <td class="num">{r.kept}</td>
-                                        <td>{r.lasts}</td>
-                                        <td class="num">{r.left}</td>
-                                        <td class="num">{r.unused_allowance}</td>
-                                        <td class="num">{r.accounts}</td>
+                                        <td class="num">{r.tax.clone()}</td>
+                                        <td class="num">{r.kept.clone()}</td>
+                                        <td>{r.lasts.clone()}</td>
+                                        <td class="num">{r.left.clone()}</td>
+                                        <td class="num">{r.unused_allowance.clone()}</td>
+                                        <td class="num">{r.accounts.clone()}</td>
                                     </tr>
                                 }).collect_view()}
                             </tbody>
                         </table>
                     </div>
                 </div>
-            })
+            }))
         }}
     }
 }

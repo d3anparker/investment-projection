@@ -105,7 +105,11 @@ impl ShareState {
         // than hard-coding ids, so it keeps working if the catalogue changes and
         // needs no edit at all if the whole system is swapped.
         let kinds = crate::convert::TAX_SYSTEM.account_kinds();
-        let first = kinds.first().map_or("", |k| k.id);
+        // The kind a blank picker resolves to: the system's own default, asked
+        // for rather than presumed to be the first entry.
+        let first = crate::convert::TAX_SYSTEM
+            .default_account_kind()
+            .map_or("", |k| k.id);
         let taxable = kinds
             .iter()
             .find(|k| k.needs_cost_basis)

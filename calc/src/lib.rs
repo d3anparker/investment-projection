@@ -367,27 +367,31 @@ pub struct CalcOutput {
     // error `growth`'s definition exists to prevent. Tax is a *third* flow.
     /// Cumulative tax charged by each month, parallel to `series`. Zero through
     /// the accumulation phase: this model never taxes accumulation.
+    ///
+    /// A net-withdrawals series is deliberately *not* carried: it is exactly
+    /// `withdrawals_series - tax_series` pointwise, so a caller that wants it
+    /// zips the two rather than storing a third redundant vector.
     pub tax_series: Vec<Decimal>,
-    /// Cumulative net withdrawals — money in the holder's pocket — parallel to
-    /// `series`. Derived from the *rounded* gross and tax series so the three
-    /// reconcile pointwise on screen rather than only approximately.
-    pub net_withdrawals_series: Vec<Decimal>,
     pub tax_paid_total: Decimal,
     pub net_withdrawn_total: Decimal,
     /// `tax_paid_total / withdrawn_total`, zero when nothing was withdrawn.
     pub effective_tax_rate: Decimal,
-    /// Tax charged in each tax period of the drawdown, oldest first. The only
-    /// way to see fiscal drag build up over time, and free — the ledger has it.
-    pub tax_by_period: Vec<Decimal>,
     /// Tax-free headroom that went unclaimed across the drawdown.
     ///
     /// The "show your working" figure: it is what explains *why* one withdrawal
     /// order beats another, and it turns a comparison of strategies from a
     /// scoreboard into an explanation.
     pub unused_allowance_total: Decimal,
+    /// Months in the tax period `accounts_touched` is bucketed by — a fact
+    /// owned by the tax system, so `None` on an untaxed
+    /// projection, which has no fiscal period to count per. Reported rather than
+    /// assumed to be twelve, which is a legislature-owned figure `calc` must not
+    /// bake in.
+    pub period_months: Option<u32>,
     /// How many distinct account kinds were drawn from in each tax period. The
     /// simplicity axis, and an honest counterweight to an optimiser that would
-    /// have the holder touch four accounts every month.
+    /// have the holder touch four accounts every month. Without a tax system
+    /// there are no periods, so the whole drawdown counts as a single one.
     pub accounts_touched: Vec<usize>,
     /// The typical number of account kinds touched in a period, rounded to
     /// nearest. `None` when there were no periods to average over.
@@ -396,7 +400,8 @@ pub struct CalcOutput {
     /// rounds is a numeric policy: rounding up turns "one account in nine
     /// periods out of ten" into the same figure as "two every period", which is
     /// the one distinction the number exists to draw.
-    pub accounts_touched_typical: Option<usize>,    /// [`Strategy::RateCapped`] only: the cap had to be exceeded to deliver the
+    pub accounts_touched_typical: Option<usize>,
+    /// [`Strategy::RateCapped`] only: the cap had to be exceeded to deliver the
     /// requested income.
     pub rate_cap_breached: bool,
     /// The tax period the figures were computed under (e.g. "2026/27"), and when
@@ -432,12 +437,20 @@ struct Ledger<'a> {
 ///
 /// The *message* is always the tax system's own, so `calc` never hard-codes an
 /// age limit, an allowance or an account name; its job is only to pick a field.
-fn tax_error(e: TaxError) -> CalcError {
+///
+/// `holding` is the index of the holding whose draw raised the error, where a
+/// caller knows it. It lets the one error that is unambiguously about a single
+/// row — an account kind the system does not recognise — name that row's
+/// account picker, rather than stranding its message at the foot of the form.
+/// Portfolio-level failures (a bad region, negative other income) ignore it.
+fn tax_error(e: TaxError, holding: Option<usize>) -> CalcError {
     let field = match e.kind {
         TaxErrorKind::BadRegion => Some(Field::Region),
         TaxErrorKind::BadOtherIncome => Some(Field::OtherIncome),
         TaxErrorKind::AgeGated => Some(Field::Age),
-        TaxErrorKind::Overflow | TaxErrorKind::BadRules | TaxErrorKind::UnknownAccount => None,
+        TaxErrorKind::UnknownAccount => holding
+            .map(|index| Field::Investment { index, part: InvestmentField::AccountKind }),
+        TaxErrorKind::Overflow | TaxErrorKind::BadRules => None,
     };
     CalcError::new(e.message, field)
 }
@@ -487,7 +500,7 @@ fn open_session(tax: &TaxContext) -> Result<Box<dyn TaxSession>, CalcError> {
 
     tax.system
         .open(&SessionSpec { region: tax.region.clone(), other_income, age, uprate })
-        .map_err(tax_error)
+        .map_err(|e| tax_error(e, None))
 }
 
 /// How the greedy ranks one holding against another, cheapest first.
@@ -532,11 +545,13 @@ fn priority_of(
     j: usize,
 ) -> Priority {
     let (keep, expiring) = match (session, pot_of(kinds, led, j)) {
-        (Some(s), Some(pot)) => (
-            s.marginal_keep(&pot),
-            // Finite headroom at this rate means the cheapness runs out.
-            s.marginal_headroom(&pot).is_some(),
-        ),
+        (Some(s), Some(pot)) => {
+            // One ladder build for both figures: `marginal` returns the keep and
+            // the headroom together, so a cheapest-first pass does not price the
+            // same holding twice. Finite headroom means the cheapness runs out.
+            let (keep, headroom) = s.marginal(&pot);
+            (keep, headroom.is_some())
+        }
         _ => (Decimal::ONE, false),
     };
     Priority { keep, expiring, rank: kinds[j].map_or(0, |k| k.rank), index: j }
@@ -559,7 +574,7 @@ fn draw_one(
     let drawn = match (session.as_mut(), kinds[j]) {
         (Some(s), Some(k)) => {
             let pot = Pot { kind: k.id, available, cost_basis: led.basis[j] };
-            s.draw(&pot, net_wanted, stop).map_err(tax_error)?
+            s.draw(&pot, net_wanted, stop).map_err(|e| tax_error(e, Some(j)))?
         }
         // No tax system: every account is free, so gross is net.
         _ => {
@@ -948,7 +963,10 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         let kind = if catalogue.is_empty() {
             None
         } else if wanted.is_empty() {
-            catalogue.first()
+            // The system's own default (its untaxed kind), asked for rather than
+            // presumed to be ordinal 0 — the one place `calc` would otherwise
+            // bake in a contract about catalogue ordering it cannot enforce.
+            input.tax.as_ref().and_then(|t| t.system.default_account_kind())
         } else {
             Some(catalogue.iter().find(|k| k.id == wanted).ok_or_else(|| {
                 CalcError::at(
@@ -1041,13 +1059,17 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         _ => Vec::new(),
     };
 
-    let period_months = session.as_ref().map_or(12, |s| s.period_months()).max(1);
+    // The tax period's length is the tax system's to state; an untaxed
+    // projection has none, and manufactures no fiscal years to bucket by. The
+    // loop constant below is only ever consulted while a session exists (the
+    // period boundary is gated on that), so its fallback is never reached.
+    let period_months = session.as_ref().map(|s| s.period_months().max(1));
+    let period_len = period_months.unwrap_or(12) as usize;
     // Scratch reused by every drawdown month rather than reallocated per month:
     // `before` snapshots the balances to diff against, `blocked` is the greedy's
     // out-of-contention set. Both are overwritten in full before each use.
     let mut before: Vec<Decimal> = vec![Decimal::ZERO; n];
     let mut blocked: Vec<bool> = vec![false; n];
-    let mut tax_by_period: Vec<Decimal> = Vec::new();
     let mut accounts_touched: Vec<usize> = Vec::new();
     let mut period_kinds: Vec<&str> = Vec::new();
     let mut rate_cap_breached = false;
@@ -1129,10 +1151,12 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
             // since allowances are not pro-rated for part periods.
             let month_of_drawdown = i - horizon;
             // Month zero opens the first period rather than closing one, so the
-            // boundary only bites from the second period on.
-            if month_of_drawdown > 0 && month_of_drawdown % (period_months as usize) == 0 {
+            // boundary only bites from the second period on. Only a tax system
+            // defines a period: without a session there is nothing to reset and
+            // no fiscal year to bucket into, so the whole drawdown stays one
+            // period (`PreserveGrowth` on an untaxed projection takes this path).
+            if session.is_some() && month_of_drawdown > 0 && month_of_drawdown % period_len == 0 {
                 if let Some(s) = session.as_mut() {
-                    tax_by_period.push(round2(s.period_tax()));
                     s.start_period();
                 }
                 accounts_touched.push(period_kinds.len());
@@ -1243,11 +1267,9 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
                 .map(|k| (start + k) as u32)
         });
 
-    // The last tax period never reaches a boundary, so close it here.
+    // The last (or, untaxed, the only) period never reaches a boundary, so
+    // close it here.
     if ordered {
-        if let Some(s) = session.as_ref() {
-            tax_by_period.push(round2(s.period_tax()));
-        }
         accounts_touched.push(period_kinds.len());
     }
     // Only reported when a session actually priced something. A pro-rata run
@@ -1309,13 +1331,6 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     let growth_pct = growth.checked_div(deployed).unwrap_or(Decimal::ZERO);
 
     let tax_series: Vec<Decimal> = taxed.iter().map(|v| round2(*v)).collect();
-    // Derived from the *rounded* pair, not rounded independently, so
-    // `gross == net + tax` holds pointwise on screen.
-    let net_withdrawals_series: Vec<Decimal> = withdrawals_series
-        .iter()
-        .zip(tax_series.iter())
-        .map(|(w, t)| *w - *t)
-        .collect();
     let tax_paid_total = round2(tax_total);
     let net_withdrawn_total = withdrawn_total - tax_paid_total;
     let effective_tax_rate = tax_paid_total
@@ -1340,12 +1355,11 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         growth_pct,
         deployed,
         tax_series,
-        net_withdrawals_series,
         tax_paid_total,
         net_withdrawn_total,
         effective_tax_rate,
-        tax_by_period,
         unused_allowance_total,
+        period_months,
         accounts_touched,
         accounts_touched_typical,
         rate_cap_breached,
@@ -2504,14 +2518,17 @@ mod tests {
             );
             let out = calculate(&input).unwrap();
 
-            for (i, ((gross, tax), net)) in out
+            // Net is not carried as its own series — a caller derives it as
+            // `gross - tax`. What the series must guarantee is that doing so
+            // never goes negative: tax never exceeds the gross it is charged on,
+            // pointwise on the rounded figures.
+            for (i, (gross, tax)) in out
                 .withdrawals_series
                 .iter()
                 .zip(out.tax_series.iter())
-                .zip(out.net_withdrawals_series.iter())
                 .enumerate()
             {
-                assert_eq!(*gross, *net + *tax, "{name}: month {i} must reconcile");
+                assert!(*tax <= *gross, "{name}: month {i} tax cannot exceed gross");
             }
             assert_eq!(
                 out.withdrawn_total,
@@ -2613,8 +2630,10 @@ mod tests {
         let out = calculate(&input).unwrap();
         assert_eq!(out.tax_paid_total, Decimal::ZERO, "each year's allowance covers it");
         assert_eq!(out.withdrawn_total, Decimal::from(24_000));
-        assert_eq!(out.tax_by_period.len(), 2, "two tax periods");
-        assert!(out.tax_by_period.iter().all(|t| t.is_zero()));
+        // The 24-month drawdown spans two twelve-month periods; the allowance
+        // resets at the boundary, which is why the second year is free again.
+        assert_eq!(out.period_months, Some(12));
+        assert_eq!(out.accounts_touched.len(), 2, "two tax periods");
     }
 
     #[test]

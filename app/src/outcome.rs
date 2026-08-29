@@ -48,39 +48,16 @@ impl Outcome {
         }
     }
 
-    pub fn flags_horizon(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Horizon))
-    }
-
-    pub fn flags_drawdown(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Drawdown))
-    }
-
-    pub fn flags_withdrawal(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Withdrawal))
-    }
-
-    pub fn flags_other_income(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::OtherIncome))
-    }
-
-    /// Age and region share the age control's neighbourhood in the form, but a
-    /// bad region is the region select's problem, so they stay separate.
-    pub fn flags_age(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Age))
-    }
-
-    pub fn flags_region(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Region))
-    }
-
-    /// The withdrawal-order picker, and the rate cap that belongs to it.
-    pub fn flags_strategy(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Strategy))
-    }
-
-    pub fn flags_uprate(&self) -> bool {
-        matches!(self.error().and_then(|e| e.field), Some(Field::Uprate))
+    /// Is the current error about this form-level control?
+    ///
+    /// One method for every whole-form field (horizon, drawdown, withdrawal,
+    /// other income, age, region, strategy, uprate), rather than eight one-line
+    /// copies that differed only in the variant. The per-row investment fields
+    /// keep their own [`flags`](Self::flags), which additionally has to map an
+    /// index back through `row_ids`. `Field` is `Copy + Eq`, so a caller passes
+    /// the variant it means: `o.flags_field(Field::Age)`.
+    pub fn flags_field(&self, field: Field) -> bool {
+        self.error().and_then(|e| e.field) == Some(field)
     }
 }
 
@@ -149,23 +126,23 @@ mod tests {
     }
 
     #[test]
-    fn flags_horizon_only_for_horizon_errors() {
-        assert!(err_outcome(Some(Field::Horizon), vec![]).flags_horizon());
+    fn flags_field_only_for_the_matching_field() {
+        assert!(err_outcome(Some(Field::Horizon), vec![]).flags_field(Field::Horizon));
         assert!(!err_outcome(
             Some(Field::Investment { index: 0, part: InvestmentField::Value }),
             vec![0]
         )
-        .flags_horizon());
-        assert!(!err_outcome(None, vec![]).flags_horizon());
+        .flags_field(Field::Horizon));
+        assert!(!err_outcome(None, vec![]).flags_field(Field::Horizon));
     }
 
     #[test]
-    fn flags_drawdown_and_withdrawal_only_for_their_errors() {
-        assert!(err_outcome(Some(Field::Drawdown), vec![]).flags_drawdown());
-        assert!(!err_outcome(Some(Field::Drawdown), vec![]).flags_withdrawal());
-        assert!(err_outcome(Some(Field::Withdrawal), vec![]).flags_withdrawal());
-        assert!(!err_outcome(Some(Field::Withdrawal), vec![]).flags_drawdown());
-        assert!(!err_outcome(Some(Field::Horizon), vec![]).flags_drawdown());
+    fn flags_field_distinguishes_neighbouring_controls() {
+        assert!(err_outcome(Some(Field::Drawdown), vec![]).flags_field(Field::Drawdown));
+        assert!(!err_outcome(Some(Field::Drawdown), vec![]).flags_field(Field::Withdrawal));
+        assert!(err_outcome(Some(Field::Withdrawal), vec![]).flags_field(Field::Withdrawal));
+        assert!(!err_outcome(Some(Field::Withdrawal), vec![]).flags_field(Field::Drawdown));
+        assert!(!err_outcome(Some(Field::Horizon), vec![]).flags_field(Field::Drawdown));
     }
 
     #[test]
@@ -174,7 +151,7 @@ mod tests {
         assert!(out.error().is_none());
         assert!(out.message().is_none());
         assert!(!out.flags(0, InvestmentField::Value));
-        assert!(!out.flags_horizon());
+        assert!(!out.flags_field(Field::Horizon));
     }
 
     #[test]

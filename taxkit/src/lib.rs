@@ -342,6 +342,20 @@ pub trait TaxSystem: Sync {
     /// depends on the jurisdiction's own cycle.
     fn staleness(&self, today: SimpleDate) -> Staleness;
 
+    /// The account kind a holding falls into when it names none — what a blank
+    /// picker resolves to.
+    ///
+    /// Every system is expected to make this its *untaxed* kind, so a portfolio
+    /// that says nothing about accounts is projected untaxed, exactly as it was
+    /// before the tax model existed. The default is the first advertised kind
+    /// (presentation order), which encodes that expectation as one overridable
+    /// method instead of three independent `account_kinds().first()` calls in
+    /// the consumers. A system whose catalogue does not lead with its untaxed
+    /// kind must override this.
+    fn default_account_kind(&self) -> Option<&'static AccountKind> {
+        self.account_kinds().first()
+    }
+
     /// Look up an account kind by id.
     fn account_kind(&self, id: &str) -> Option<&'static AccountKind> {
         self.account_kinds().iter().find(|k| k.id == id)
@@ -385,6 +399,19 @@ pub trait TaxSession {
     /// clever, never wrong. Hence the default.
     fn marginal_headroom(&self, _pot: &Pot) -> Option<Decimal> {
         None
+    }
+
+    /// Both marginal figures at once: what the next unit keeps, and the headroom
+    /// at that rate before it steps up.
+    ///
+    /// Exists so an implementation that has to build a rate ladder can build it
+    /// **once** and read both figures off it, rather than paying for the same
+    /// build twice when a caller (a cheapest-first sort) needs both. Defaulted in
+    /// terms of [`marginal_keep`](Self::marginal_keep) and
+    /// [`marginal_headroom`](Self::marginal_headroom), so it is a purely additive
+    /// change: overriding it buys speed, and is never a requirement.
+    fn marginal(&self, pot: &Pot) -> (Decimal, Option<Decimal>) {
+        (self.marginal_keep(pot), self.marginal_headroom(pot))
     }
 
     /// Take money out of `pot`, aiming to deliver `net_wanted`, and commit the

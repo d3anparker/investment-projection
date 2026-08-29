@@ -550,6 +550,18 @@ impl TaxSession for UkSession {
         self.ladder_for(pot).ok().and_then(|(l, _)| l.marginal_headroom())
     }
 
+    /// Both figures off a single ladder build. `ladder_for` is the crate's one
+    /// hot allocation (a linear scan of the tables plus, for a pension, the
+    /// tax-free-fraction split), and a cheapest-first ranking asks for both the
+    /// keep and the headroom of every holding every pass — so building the
+    /// ladder once here rather than once per figure roughly halves that cost.
+    fn marginal(&self, pot: &Pot) -> (Decimal, Option<Decimal>) {
+        match self.ladder_for(pot) {
+            Ok((l, _)) => (l.marginal_keep(), l.marginal_headroom()),
+            Err(_) => (Decimal::ZERO, None),
+        }
+    }
+
     fn draw(&mut self, pot: &Pot, net_wanted: Decimal, stop: StopAt) -> Result<Draw, TaxError> {
         let (ladder, treatment) = self.ladder_for(pot)?;
         let walk = ladder.walk(pot.available, net_wanted, stop)?;

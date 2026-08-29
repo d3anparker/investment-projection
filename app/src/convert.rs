@@ -204,7 +204,7 @@ pub fn kind_from(id: &str) -> String {
     if TAX_SYSTEM.account_kind(id).is_some() {
         id.to_string()
     } else {
-        TAX_SYSTEM.account_kinds().first().map_or(String::new(), |k| k.id.to_string())
+        TAX_SYSTEM.default_account_kind().map_or(String::new(), |k| k.id.to_string())
     }
 }
 

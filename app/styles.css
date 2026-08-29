@@ -694,22 +694,38 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 /* Between the row breakpoint and the two-column layout there is room for four
-   of the five supporting cards but not the fifth, and flex-grow then inflates
-   that orphan to the whole width of its row. Thirds wrap it 3 + 2 instead.
-   Above 960px the 160px basis already fits all five on one row, so this band
-   is the only place the rule is needed.
+   supporting cards but not five, and flex-grow then inflates the orphaned card
+   to the whole width of its row. Thirds wrap the supporting cards 3-across
+   instead. Above 960px the 160px basis already fits a full row, so this band is
+   the only place the rule is needed.
 
    Counted, not applied to every `.stat`: with only four supporting cards the
    160px basis already fits all four on one row here, and forcing thirds on them
    re-creates the very orphan this rule exists to remove (3 + 1, the fourth card
    inflated to full width). `.stat-accent` is always the summary's first child,
    so `:nth-last-child(6)` means "six cards in total" and `~` reaches exactly the
-   five that follow it. The `.98` on the upper bound closes the sub-pixel gap
-   against the `min-width: 960px` layout query, which a fractional viewport
-   (browser zoom) would otherwise fall into. */
+   five that follow it. The summary now runs to eight cards (a taxed drawdown
+   with deposits: headline, value today, handover, deposits, taken out, tax,
+   kept, growth), so the six-, seven- and eight-card counts each get the rule;
+   the five that fit unaided (three and four supporting) do not. The `.98` on the
+   upper bound closes the sub-pixel gap against the `min-width: 960px` layout
+   query, which a fractional viewport (browser zoom) would otherwise fall into. */
 @media (min-width: 620px) and (max-width: 959.98px) {
-  .stat-accent:nth-last-child(6) ~ .stat {
+  .stat-accent:nth-last-child(6) ~ .stat,
+  .stat-accent:nth-last-child(7) ~ .stat,
+  .stat-accent:nth-last-child(8) ~ .stat {
     flex-basis: calc(33.333% - 8px);
+  }
+
+  /* Five and six supporting cards wrap 3 + 2 and 3 + 3 — neither leaves a lone
+     card. Seven wrap 3 + 3 + 1, and without a cap that last card's flex-grow
+     would balloon it to the full row width, the exact orphan the band's rule
+     exists to remove. Capping every card in the eight-card case at a third
+     holds the lone one to a third, left-aligned, instead. Only this count needs
+     it, so the cap is scoped to it and the 3 + 2 second row keeps growing to
+     fill as before. */
+  .stat-accent:nth-last-child(8) ~ .stat {
+    max-width: calc(33.333% - 8px);
   }
 }
 

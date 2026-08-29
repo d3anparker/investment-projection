@@ -6,7 +6,7 @@
 //! is the "Copy link" clipboard/history glue); everything numeric it merely
 //! *formats* — see the crate-root docs and `calc`.
 
-use calc::{calculate, solve, CalcOutput, InvestmentField, Solution};
+use calc::{calculate, solve, CalcOutput, Field, InvestmentField, Solution};
 use crate::convert::{build_input, FormInput, RowData};
 use crate::goal::{build_goal, describe, GoalKind};
 use crate::model::{bind_value, new_row, remove_label, remove_row};
@@ -296,14 +296,14 @@ pub fn App() -> impl IntoView {
 
     // The form-level controls whose error state comes from a `Field` rather than a
     // row: one borrowed read of `outcome` each, shared by their three attributes.
-    let horizon_bad = create_memo(move |_| outcome.with(|o| o.flags_horizon()));
-    let drawdown_bad = create_memo(move |_| outcome.with(|o| o.flags_drawdown()));
-    let withdrawal_bad = create_memo(move |_| outcome.with(|o| o.flags_withdrawal()));
-    let income_bad = create_memo(move |_| outcome.with(|o| o.flags_other_income()));
-    let age_bad = create_memo(move |_| outcome.with(|o| o.flags_age()));
-    let strategy_bad = create_memo(move |_| outcome.with(|o| o.flags_strategy()));
-    let uprate_bad = create_memo(move |_| outcome.with(|o| o.flags_uprate()));
-    let region_bad = create_memo(move |_| outcome.with(|o| o.flags_region()));
+    let horizon_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Horizon)));
+    let drawdown_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Drawdown)));
+    let withdrawal_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Withdrawal)));
+    let income_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::OtherIncome)));
+    let age_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Age)));
+    let strategy_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Strategy)));
+    let uprate_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Uprate)));
+    let region_bad = create_memo(move |_| outcome.with(|o| o.flags_field(Field::Region)));
 
     // "Copy link" confirmation. A discrete click, not a per-keystroke rewrite,
     // so a live region here is safe (it can't talk over typing). Cleared after a
@@ -431,7 +431,8 @@ pub fn App() -> impl IntoView {
                             let value_bad = flagged(InvestmentField::Value);
                             let contribution_bad = flagged(InvestmentField::Contribution);
                             let rate_bad = flagged(InvestmentField::Rate);
-        let basis_bad = flagged(InvestmentField::CostBasis);
+                            let basis_bad = flagged(InvestmentField::CostBasis);
+                            let account_bad = flagged(InvestmentField::AccountKind);
                             view! {
                             <div class="inv-row">
                                 <label class="fld">
@@ -501,6 +502,9 @@ pub fn App() -> impl IntoView {
                                         // set is static: swapping options reactively makes
                                         // the browser reset the control.
                                         <select
+                                            aria-invalid=move || invalid_attrs(account_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(account_bad.get()).1
+                                            class:field-invalid=move || account_bad.get()
                                             on:change=move |ev| r.account_kind.set(event_target_value(&ev))>
                                             {convert::TAX_SYSTEM.account_kinds().iter().map(|k| view! {
                                                 <option
