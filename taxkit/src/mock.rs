@@ -225,6 +225,10 @@ impl TaxSession for MockSession {
             .unwrap_or(Decimal::ZERO)
     }
 
+    fn marginal_headroom(&self, pot: &Pot) -> Option<Decimal> {
+        self.ladder_for(pot).ok().and_then(|l| l.marginal_headroom())
+    }
+
     fn draw(&mut self, pot: &Pot, net_wanted: Decimal, stop: StopAt) -> Result<Draw, TaxError> {
         let ladder = self.ladder_for(pot)?;
         let walk = ladder.walk(pot.available, net_wanted, stop)?;

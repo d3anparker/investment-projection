@@ -14,7 +14,7 @@ use crate::outcome::{invalid_attrs, Outcome, ANNOUNCE_DELAY, ERROR_ID};
 use crate::results::ResultsPanel;
 use crate::share::ShareState;
 use crate::summary::SummaryPanel;
-use crate::{format, model, share};
+use crate::{convert, format, freshness, model, share, strategy};
 use leptos::leptos_dom::helpers::TimeoutHandle;
 use leptos::*;
 use std::time::Duration;
@@ -33,6 +33,8 @@ fn snapshot(rows: RwSignal<Vec<model::Row>>) -> Vec<RowData> {
             value: r.value.get(),
             rate: r.rate.get(),
             contribution: r.contribution.get(),
+            account_kind: r.account_kind.get(),
+            cost_basis: r.cost_basis.get(),
         })
         .collect()
 }
@@ -104,7 +106,7 @@ pub fn App() -> impl IntoView {
         state
             .rows
             .iter()
-            .map(|r| new_row(counter, &r.name, &r.value, &r.rate, &r.contribution))
+            .map(|r| new_row(counter, r))
             .collect::<Vec<_>>(),
     );
     let horizon_value = create_rw_signal(state.horizon_value);
@@ -118,6 +120,27 @@ pub fn App() -> impl IntoView {
     let drawdown_unit = create_rw_signal(state.drawdown_unit);
     let withdrawal = create_rw_signal(state.withdrawal);
     let is_drawdown = move || plan_kind.get() == "drawdown";
+
+    // The tax controls. All drawdown-only, and all inert while the withdrawal is
+    // split pro-rata -- that strategy ignores tax entirely, so `convert::tax_from`
+    // hands `calc` no context at all and the projection stays exactly what it was
+    // before any of this existed.
+    let strategy = create_rw_signal(state.strategy);
+    let rate_cap = create_rw_signal(state.rate_cap);
+    let region = create_rw_signal(convert::region_from(&state.region));
+    let other_income = create_rw_signal(state.other_income);
+    let age = create_rw_signal(state.age);
+    let uprate = create_rw_signal(state.uprate);
+    // Asked of the resolver rather than tested against the raw string:
+    // `strategy_from` maps anything it does not recognise to pro-rata (so an old
+    // link still opens), and a second predicate spelling that rule out by hand
+    // drifts from it -- an unknown id used to render the whole tax fieldset for
+    // a projection that was quietly running pro-rata and ignoring every field
+    // in it.
+    let tax_aware = move || {
+        is_drawdown()
+            && convert::strategy_from(&strategy.get(), &rate_cap.get()) != calc::Strategy::ProRata
+    };
 
     // Goal-seek state. The target is blank in the example, which keeps the
     // feature inert (`build_goal` returns `None`) until the user asks a question.
@@ -139,18 +162,47 @@ pub fn App() -> impl IntoView {
     // pure `build_input`. Reading the signals here is what makes the projection
     // recompute on any edit; the memo caches so `calculate` runs once. A `Copy`
     // closure over `Copy` signal handles, so it is reusable across the memos.
-    let build_current = move || {
-        build_input(&FormInput {
-            rows: snapshot(rows),
-            horizon_value: horizon_value.get(),
-            horizon_unit: horizon_unit.get(),
-            plan: plan_kind.get(),
-            drawdown_value: drawdown_value.get(),
-            drawdown_unit: drawdown_unit.get(),
-            withdrawal: withdrawal.get(),
-        })
+    // The form, as plain strings. Split out from `build_current` so the
+    // comparison memo can reach the raw fields as well as the built input.
+    let form_snapshot = move || FormInput {
+        rows: snapshot(rows),
+        horizon_value: horizon_value.get(),
+        horizon_unit: horizon_unit.get(),
+        plan: plan_kind.get(),
+        drawdown_value: drawdown_value.get(),
+        drawdown_unit: drawdown_unit.get(),
+        withdrawal: withdrawal.get(),
+        strategy: strategy.get(),
+        rate_cap: rate_cap.get(),
+        region: region.get(),
+        other_income: other_income.get(),
+        age: age.get(),
+        uprate: uprate.get(),
     };
+    let build_current = move || build_input(&form_snapshot());
 
+
+    // The strategy comparison, a separate memo for the same reason the goal
+    // answer is: a strategy that empties the pot early is not an input error, so
+    // it must never mark the form stale or dim the projection panels.
+    let comparison = create_memo(move |_| {
+        if !is_drawdown() {
+            return Vec::new();
+        }
+        let f = form_snapshot();
+        let (mut input, _) = convert::build_input(&f);
+        // The comparison needs tax details whatever order is currently selected —
+        // otherwise every tax-aware row reads "fill in the tax details" for a
+        // reader who has not yet worked out that those details are the thing
+        // that unlocks them. See `convert::tax_context`.
+        input.tax = convert::tax_context(&f);
+        strategy::compare(&input)
+    });
+
+    // Read once at mount, not in a memo: the clock is not reactive, and letting
+    // a date into the projection would make the same shared link produce
+    // different figures depending on when it was opened.
+    let today = store_value(freshness::today());
     let outcome = create_memo(move |_| {
         let (input, row_ids) = build_current();
         Outcome { result: calculate(&input), row_ids }
@@ -233,7 +285,7 @@ pub fn App() -> impl IntoView {
     // sibling button left to step to.
     let add_btn = create_node_ref::<html::Button>();
     let add_row = move |_| {
-        let row = new_row(counter, "", "", "", "");
+        let row = new_row(counter, &RowData::default());
         rows.update(|v| v.push(row));
     };
     let horizon_ref = bind_value(horizon_value);
@@ -247,6 +299,11 @@ pub fn App() -> impl IntoView {
     let horizon_bad = create_memo(move |_| outcome.with(|o| o.flags_horizon()));
     let drawdown_bad = create_memo(move |_| outcome.with(|o| o.flags_drawdown()));
     let withdrawal_bad = create_memo(move |_| outcome.with(|o| o.flags_withdrawal()));
+    let income_bad = create_memo(move |_| outcome.with(|o| o.flags_other_income()));
+    let age_bad = create_memo(move |_| outcome.with(|o| o.flags_age()));
+    let strategy_bad = create_memo(move |_| outcome.with(|o| o.flags_strategy()));
+    let uprate_bad = create_memo(move |_| outcome.with(|o| o.flags_uprate()));
+    let region_bad = create_memo(move |_| outcome.with(|o| o.flags_region()));
 
     // "Copy link" confirmation. A discrete click, not a per-keystroke rewrite,
     // so a live region here is safe (it can't talk over typing). Cleared after a
@@ -264,6 +321,12 @@ pub fn App() -> impl IntoView {
             withdrawal: withdrawal.get(),
             goal_target: goal_target.get(),
             goal_kind: goal_kind.get(),
+            strategy: strategy.get(),
+            rate_cap: rate_cap.get(),
+            region: region.get(),
+            other_income: other_income.get(),
+            age: age.get(),
+            uprate: uprate.get(),
         };
         // Write the fragment with replace_state so the shared link doesn't pile
         // up Back-button history entries. The status is set inside (address-bar
@@ -339,7 +402,7 @@ pub fn App() -> impl IntoView {
 
                 <section class="panel">
                     <h2>"Your investments"</h2>
-                    <div class="inv-editor">
+                    <div class="inv-editor" class:with-accounts=is_drawdown>
                         <div class="inv-head" aria-hidden="true">
                             <span>"Name"</span>
                             <span>"Value today"</span>
@@ -368,6 +431,7 @@ pub fn App() -> impl IntoView {
                             let value_bad = flagged(InvestmentField::Value);
                             let contribution_bad = flagged(InvestmentField::Contribution);
                             let rate_bad = flagged(InvestmentField::Rate);
+        let basis_bad = flagged(InvestmentField::CostBasis);
                             view! {
                             <div class="inv-row">
                                 <label class="fld">
@@ -420,6 +484,61 @@ pub fn App() -> impl IntoView {
                                             on:input=move |ev| r.rate.set(event_target_value(&ev)) />
                                     </span>
                                 </label>
+                                // Drawdown-only, like the cost box below it. In
+                                // deposits mode the account changes nothing about
+                                // the numbers, and an inert control that looks
+                                // like it matters is worse than no control — it
+                                // also keeps the aligned four-field row exactly
+                                // as it was before accounts existed.
+                                {move || is_drawdown().then(|| view! {
+                                    <label class="fld fld-account">
+                                        <span class="fld-lbl">"Account"</span>
+                                        // Built from the tax system's catalogue, never from
+                                        // a hard-coded list, and driven by `selected=` rather
+                                        // than `prop:value` — a select's props are set before
+                                        // its options exist, so a seeded non-default value
+                                        // silently falls back to the first entry. The option
+                                        // set is static: swapping options reactively makes
+                                        // the browser reset the control.
+                                        <select
+                                            on:change=move |ev| r.account_kind.set(event_target_value(&ev))>
+                                            {convert::TAX_SYSTEM.account_kinds().iter().map(|k| view! {
+                                                <option
+                                                    value=k.id
+                                                    title=k.note
+                                                    selected=move || r.account_kind.get() == k.id>
+                                                    {k.short_label}
+                                                </option>
+                                            }).collect_view()}
+                                        </select>
+                                    </label>
+                                })}
+                                // Only for kinds that are taxed on the gain, and asked
+                                // of the catalogue rather than matched against a named
+                                // wrapper — so no jurisdiction leaks into the markup.
+                                {move || {
+                                    let needs = convert::TAX_SYSTEM
+                                        .account_kind(&r.account_kind.get())
+                                        .is_some_and(|k| k.needs_cost_basis);
+                                    (needs && is_drawdown()).then(|| {
+                                        let basis_ref = bind_value(r.cost_basis);
+                                        view! {
+                                            <label class="fld fld-basis">
+                                                <span class="fld-lbl">"Cost"</span>
+                                                <span class="adorn adorn-money">
+                                                    <input
+                                                        type="text" inputmode="decimal"
+                                                        placeholder="what it cost"
+                                                        node_ref=basis_ref
+                                                        aria-invalid=move || invalid_attrs(basis_bad.get()).0
+                                                        aria-describedby=move || invalid_attrs(basis_bad.get()).1
+                                                        class:field-invalid=move || basis_bad.get()
+                                                        on:input=move |ev| r.cost_basis.set(event_target_value(&ev)) />
+                                                </span>
+                                            </label>
+                                        }
+                                    })
+                                }}
                                 <button
                                     class="btn btn-remove"
                                     title=move || remove_label(r, rows)
@@ -514,6 +633,124 @@ pub fn App() -> impl IntoView {
                         })}
                     </div>
 
+
+                    // The withdrawal order, and the tax details it needs. Both
+                    // drawdown-only. Every label and option here is asked of the
+                    // tax system rather than written out, so nothing in this
+                    // markup names a jurisdiction.
+                    {move || is_drawdown().then(|| {
+                        // Refs are created inside this block so a fresh binding
+                        // effect applies the seeded value when it mounts.
+                        let cap_ref = bind_value(rate_cap);
+                        let income_ref = bind_value(other_income);
+                        let age_ref = bind_value(age);
+                        let uprate_ref = bind_value(uprate);
+                        let regions = convert::TAX_SYSTEM.regions();
+                        view! {
+                        <fieldset class="tax-settings">
+                            <legend>"How to take it"</legend>
+
+                            <div class="period-row">
+                                <label for="strategy">"Take it"</label>
+                                <select id="strategy"
+                                    on:change=move |ev| strategy.set(event_target_value(&ev))>
+                                    <option value=convert::STRATEGY_PRO_RATA
+                                        selected=move || !tax_aware()>
+                                        "\u{2014} split across everything"
+                                    </option>
+                                    <option value=convert::STRATEGY_CONVENTIONAL
+                                        selected=move || strategy.get() == convert::STRATEGY_CONVENTIONAL>
+                                        "\u{2014} in the conventional order"
+                                    </option>
+                                    <option value=convert::STRATEGY_CHEAPEST
+                                        selected=move || strategy.get() == convert::STRATEGY_CHEAPEST>
+                                        "\u{2014} lowest tax this month"
+                                    </option>
+                                    <option value=convert::STRATEGY_PRESERVE
+                                        selected=move || strategy.get() == convert::STRATEGY_PRESERVE>
+                                        "\u{2014} longest-lasting pot"
+                                    </option>
+                                    <option value=convert::STRATEGY_CAPPED
+                                        selected=move || strategy.get() == convert::STRATEGY_CAPPED>
+                                        "\u{2014} staying under a tax rate"
+                                    </option>
+                                </select>
+                            </div>
+
+                            {move || (strategy.get() == convert::STRATEGY_CAPPED).then(|| view! {
+                                <div class="period-row">
+                                    <label for="rate-cap">"never paying more than"</label>
+                                    <span class="adorn adorn-pct">
+                                        <input id="rate-cap" type="text" inputmode="decimal"
+                                            placeholder="20" node_ref=cap_ref
+                                            aria-invalid=move || invalid_attrs(strategy_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(strategy_bad.get()).1
+                                            class:field-invalid=move || strategy_bad.get()
+                                            on:input=move |ev| rate_cap.set(event_target_value(&ev)) />
+                                    </span>
+                                    <span>"at the margin"</span>
+                                </div>
+                            })}
+
+                            // Inert while splitting pro-rata: that ignores tax
+                            // entirely, so asking for these would imply they
+                            // changed something.
+                            {move || tax_aware().then(|| view! {
+                                <div class="period-row">
+                                    <label for="other-income">"Other taxable income"</label>
+                                    <span class="adorn adorn-money">
+                                        <input id="other-income" type="text" inputmode="decimal"
+                                            placeholder="0" node_ref=income_ref
+                                            aria-invalid=move || invalid_attrs(income_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(income_bad.get()).1
+                                            class:field-invalid=move || income_bad.get()
+                                            on:input=move |ev| other_income.set(event_target_value(&ev)) />
+                                    </span>
+                                    <span>"a year"</span>
+                                </div>
+                                <div class="period-row">
+                                    <label for="age">"Age when it starts"</label>
+                                    <input id="age" type="text" inputmode="numeric"
+                                        placeholder="60" node_ref=age_ref
+                                        aria-invalid=move || invalid_attrs(age_bad.get()).0
+                                        aria-describedby=move || invalid_attrs(age_bad.get()).1
+                                        class:field-invalid=move || age_bad.get()
+                                        on:input=move |ev| age.set(event_target_value(&ev)) />
+                                    // A single-region tax system needs no control
+                                    // at all, so it gets none rather than a
+                                    // pointless one-option select.
+                                    {(regions.len() > 1).then(|| view! {
+                                        <label for="region">"living in"</label>
+                                        <select id="region"
+                                            aria-invalid=move || invalid_attrs(region_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(region_bad.get()).1
+                                            class:field-invalid=move || region_bad.get()
+                                            on:change=move |ev| region.set(event_target_value(&ev))>
+                                            {regions.iter().map(|rg| view! {
+                                                <option value=rg.id
+                                                    selected=move || region.get() == rg.id>
+                                                    {rg.label}
+                                                </option>
+                                            }).collect_view()}
+                                        </select>
+                                    })}
+                                </div>
+                                <div class="period-row">
+                                    <label for="uprate">"Tax thresholds rise"</label>
+                                    <span class="adorn adorn-pct">
+                                        <input id="uprate" type="text" inputmode="decimal"
+                                            placeholder="0" node_ref=uprate_ref
+                                            aria-invalid=move || invalid_attrs(uprate_bad.get()).0
+                                            aria-describedby=move || invalid_attrs(uprate_bad.get()).1
+                                            class:field-invalid=move || uprate_bad.get()
+                                            on:input=move |ev| uprate.set(event_target_value(&ev)) />
+                                    </span>
+                                    <span>"a year"</span>
+                                </div>
+                            })}
+                        </fieldset>
+                        }
+                    })}
                     // The goal, mode-aware. Two separate `<select>`s with static
                     // option sets — never one select whose options swap, which the
                     // browser resets to its first entry when the selected option is
@@ -580,6 +817,40 @@ pub fn App() -> impl IntoView {
                     <h2>"Breakdown"</h2>
                     <ResultsPanel displayed=displayed stale=stale/>
                 </section>
+
+                // How the money could be taken, and what each way costs, in its
+                // own full-width panel below the projection: it is the answer to
+                // a question the reader only asks once they believe the figures
+                // above, and its seven-column table wants the whole page width.
+                // Gated on there being something to compare, so it is absent —
+                // not an empty card — outside drawdown mode.
+                {move || (!comparison.get().is_empty()).then(|| view! {
+                    <section class="panel panel-strategy" aria-labelledby="strategy-h">
+                        <h2 id="strategy-h">"Ways to draw it down"</h2>
+                        <strategy::StrategyPanel rows=comparison/>
+
+                        // Which rules produced the tax figures, and when they were
+                        // checked. Always shown alongside them, never as a tooltip:
+                        // a tax figure without a date is a figure you cannot judge.
+                        {move || outcome.with(|o| {
+                            o.result.as_ref().ok().and_then(|out| {
+                                let (label, checked) = (out.rules_label?, out.rules_as_of?);
+                                let line = freshness::as_of_line(convert::TAX_SYSTEM, label, checked);
+                                let stale = freshness::stale_note(convert::TAX_SYSTEM, today.get_value());
+                                Some(view! {
+                                    <p class="tax-asof">{line}</p>
+                                    // `role="note"`, never `role="alert"`: this is
+                                    // standing context, not something that just
+                                    // happened, and an alert here would interrupt a
+                                    // screen reader on every recomputation.
+                                    {stale.map(|msg| view! {
+                                        <p class="tax-stale" role="note">{msg}</p>
+                                    })}
+                                })
+                            })
+                        })}
+                    </section>
+                })}
             </main>
 
             <footer class="site-foot">

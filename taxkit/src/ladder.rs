@@ -168,6 +168,28 @@ impl Ladder {
         Decimal::ONE
     }
 
+    /// How much *gross* can come out at the current marginal rate before it
+    /// steps up, or `None` if it never does.
+    ///
+    /// This is what lets a caller break a tie between two accounts that are
+    /// equally cheap right now: an account that is cheap because it has an
+    /// allowance left is use-it-or-lose-it, and should be drawn before one that
+    /// is cheap indefinitely. Without it a myopic chooser cannot tell the two
+    /// apart and will happily let an allowance expire unclaimed.
+    pub fn marginal_headroom(&self) -> Option<Decimal> {
+        for r in self.rungs() {
+            match r.headroom {
+                Some(h) if h <= Decimal::ZERO => continue,
+                // Nothing of this rung is taxable, so its headroom cannot be
+                // exhausted by withdrawing: the rate holds indefinitely.
+                _ if r.leak.is_zero() => return None,
+                None => return None,
+                Some(h) => return h.checked_div(r.leak),
+            }
+        }
+        None
+    }
+
     /// Withdraw enough to deliver `net_wanted`, from an account holding
     /// `available`.
     ///

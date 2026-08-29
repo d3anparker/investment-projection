@@ -62,6 +62,44 @@ Then open <http://localhost:8080>. The build uses [Trunk](https://trunk-rs.githu
 to compile the app to WebAssembly and serves the static output via nginx. Stop
 with `Ctrl+C`.
 
+
+## Drawing it down: which pot, and in what order
+
+Once a portfolio is being drawn down, the thing that decides what you actually
+keep is not the return — it is **which account the money comes out of**. So each
+holding can say what kind of account it sits in (ISA, SIPP, workplace pension,
+unwrapped dealing account, and so on), and the projection can then take the
+monthly income in one of several ways:
+
+- **Split across everything** — the original behaviour: a share from every
+  holding, rebalanced monthly, ignoring tax entirely.
+- **In the conventional order** — spend the unwrapped account first and the
+  pension last.
+- **Lowest tax this month** — each month, take from whichever pot costs least
+  right now, filling free allowances before they expire.
+- **Longest-lasting pot** — drain the worst compounder first so the best one is
+  left to grow. This one needs no tax details at all.
+- **Staying under a tax rate** — never draw at a marginal rate above a cap you
+  set, and say so plainly if that cap has to be broken to deliver the income.
+
+The comparison table shows all of them side by side: tax, income kept, how long
+the money lasts, what is left at the end, how much tax-free allowance went
+unclaimed, and how many accounts you would be touching each year.
+
+**It does not tell you which one is best, and that is deliberate.** "Best"
+depends on whether you care most about tax, about longevity, about what you leave
+behind, or about not having to think about it — and those pull in different
+directions. The table shows the consequences; the judgement is yours.
+
+Tax figures always carry the rules they were worked out under and the date those
+were last checked. If the rules look out of date, you get a warning — but the
+projection still runs.
+
+**None of this is tax or financial advice.** The tax model is a simplification:
+it covers income tax across all four UK jurisdictions (including the withdrawn
+personal allowance), capital gains, and phased tax-free pension cash. It does not
+model dividend or savings income, capital losses, investment bonds, inheritance
+tax, or the timing of the state pension.
 ## Deploying (GitHub Pages)
 
 Every push to `main` publishes the site to GitHub Pages via

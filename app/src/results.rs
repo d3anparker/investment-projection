@@ -38,6 +38,25 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
     let svg = chart_svg(&out.series, &out.contributions_series, handover);
     let has_contributions = !out.contributed_total.is_zero();
     let has_withdrawals = !out.withdrawn_total.is_zero();
+    // Tax columns only when tax was actually charged, so an untaxed or pro-rata
+    // projection keeps the table it always had.
+    let has_tax = !out.tax_paid_total.is_zero();
+    // The account column is worth its width only once accounts differ; a
+    // portfolio all in one wrapper says nothing by repeating it on every row.
+    // Only while drawing down, matching the editor: in deposits mode the account
+    // picker is hidden because it changes nothing, so a column naming accounts
+    // the reader cannot see or change would be a puzzle rather than information.
+    let has_accounts = drawing
+        && out
+            .investments
+            .windows(2)
+            .any(|w| w[0].account_kind != w[1].account_kind);
+    // Resolved through the catalogue, never matched against a named wrapper.
+    let account_label = |id: &str| {
+        crate::convert::TAX_SYSTEM
+            .account_kind(id)
+            .map_or_else(String::new, |k| k.label.to_string())
+    };
 
     // --- scrub state -------------------------------------------------------
     // A slider laid over the plot reads any month out; `active` keeps the marker
@@ -172,13 +191,30 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                 };
                 view! { <td class="num">{cell}</td> }
             });
+            // Tax and what was kept sit next to the gross figure they split, so
+            // the three read across as one sum rather than as three statistics.
+            // A row that took nothing out has no split to show, so both cells
+            // read as absent rather than as two zeroes.
+            let split = |v| {
+                if r.withdrawn.is_zero() {
+                    "\u{2014}".to_string()
+                } else {
+                    fmt_money(v)
+                }
+            };
+            let tax_cell = has_tax.then(|| view! { <td class="num">{split(r.tax_paid)}</td> });
+            let net_cell = has_tax.then(|| view! { <td class="num">{split(r.net_withdrawn)}</td> });            let account_cell =
+                has_accounts.then(|| view! { <td>{account_label(&r.account_kind)}</td> });
             view! {
                 <tr>
                     <td>{r.name.clone()}</td>
+                    {account_cell}
                     <td class="num">{fmt_money(r.current_value)}</td>
                     {contributed}
                     {handover_cell}
                     {withdrawn}
+                    {tax_cell}
+                    {net_cell}
                     <td class="num">{fmt_pct(r.annualised)}</td>
                     <td class="num">{fmt_money(r.projected_value)}</td>
                 </tr>
@@ -251,6 +287,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                 <thead>
                     <tr>
                         <th scope="col">"Investment"</th>
+                        {has_accounts.then(|| view! { <th scope="col">"Account"</th> })}
                         <th scope="col">"Value today"</th>
                         {has_contributions.then(|| view! {
                             <th scope="col">{format!("Deposits over {}", horizon_label(horizon))}</th>
@@ -261,6 +298,8 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                         {has_withdrawals.then(|| view! {
                             <th scope="col">{format!("Taken out over {}", horizon_label(drawdown))}</th>
                         })}
+                        {has_tax.then(|| view! { <th scope="col">"Tax"</th> })}
+                        {has_tax.then(|| view! { <th scope="col">"Kept"</th> })}
                         <th scope="col">"Annualised"</th>
                         <th scope="col">"Projected"</th>
                     </tr>

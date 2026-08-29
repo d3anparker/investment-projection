@@ -16,27 +16,30 @@ pub struct Row {
     pub value: RwSignal<String>,
     pub rate: RwSignal<String>,
     pub contribution: RwSignal<String>,
+    /// The account kind this holding sits in, as an id from the tax system.
+    pub account_kind: RwSignal<String>,
+    /// What it originally cost. Only rendered for kinds that ask for it.
+    pub cost_basis: RwSignal<String>,
     /// The row's own remove button. Held here rather than created inside the
     /// `For` body so a *sibling* row's handler can reach it to place focus once
     /// this row is gone — see [`remove_row`].
     pub remove_btn: NodeRef<html::Button>,
 }
 
-pub fn new_row(
-    counter: StoredValue<usize>,
-    name: &str,
-    value: &str,
-    rate: &str,
-    contribution: &str,
-) -> Row {
+/// Build a row. Takes a [`RowData`] rather than a growing list of positional
+/// strings: the two are always built from one another, and a fifth and sixth
+/// bare `&str` would be easy to transpose at a call site.
+pub fn new_row(counter: StoredValue<usize>, data: &crate::convert::RowData) -> Row {
     let id = counter.get_value();
     counter.set_value(id + 1);
     Row {
         id,
-        name: create_rw_signal(name.to_string()),
-        value: create_rw_signal(value.to_string()),
-        rate: create_rw_signal(rate.to_string()),
-        contribution: create_rw_signal(contribution.to_string()),
+        name: create_rw_signal(data.name.clone()),
+        value: create_rw_signal(data.value.clone()),
+        rate: create_rw_signal(data.rate.clone()),
+        contribution: create_rw_signal(data.contribution.clone()),
+        account_kind: create_rw_signal(crate::convert::kind_from(&data.account_kind)),
+        cost_basis: create_rw_signal(data.cost_basis.clone()),
         remove_btn: create_node_ref(),
     }
 }

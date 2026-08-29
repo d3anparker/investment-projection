@@ -12,6 +12,10 @@
 //! - [`model`] — the reactive [`model::Row`] and its DOM helpers (signals, focus).
 //! - [`summary`] / [`results`] — the two output panels' views, both wrapped by
 //!   [`panel`]'s shared last-good/`.stale` shell.
+//! - [`strategy`] — the side-by-side comparison of withdrawal orders, which
+//!   reports several axes and deliberately ranks none of them.
+//! - [`freshness`] — whether the tax figures are still current. Reads the clock
+//!   here, at the edge, so `calc` stays a pure function of the form.
 //! - [`format`] / [`chart`] — `Decimal`→string formatting and the SVG chart.
 //! - [`app`] — the top-level [`App`] that wires these together, plus the mount
 //!   entry (`main.rs`) and the browser-bound clipboard/history glue.
@@ -23,12 +27,14 @@ mod app;
 pub mod chart;
 pub mod convert;
 pub mod format;
+pub mod freshness;
 pub mod goal;
 pub mod model;
 pub mod outcome;
 pub mod panel;
 pub mod results;
 pub mod share;
+pub mod strategy;
 pub mod summary;
 
 pub use app::App;

@@ -40,6 +40,8 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "taxkit",
+ "uktax",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
@@ -197,6 +199,7 @@ name = "calc"
 version = "0.1.0"
 dependencies = [
  "rust_decimal",
+ "taxkit",
 ]
 
 [[package]]

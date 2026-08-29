@@ -18,6 +18,7 @@
 use app::convert::RowData;
 use app::share::{self, ShareState};
 use app::App;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
@@ -481,6 +482,239 @@ async fn a_transient_error_does_not_reset_the_scrubber() {
 // Fixtures
 // =====================================================================
 
+
+// --- accounts and the tax controls -----------------------------------------
+
+/// A drawdown state with a withdrawal order and tax details filled in.
+fn taxed_state(rows: Vec<RowData>, strategy: &str) -> ShareState {
+    let mut s = state_of(rows, "1", "months");
+    s.plan = "drawdown".into();
+    s.drawdown_value = "20".into();
+    s.drawdown_unit = "years".into();
+    s.withdrawal = "1500".into();
+    s.strategy = strategy.into();
+    s.age = "60".into();
+    s
+}
+
+/// The account kinds the app is actually wired to, asked of the tax system so a
+/// test never hard-codes a jurisdiction's wrappers.
+fn kinds() -> &'static [taxkit::AccountKind] {
+    app::convert::TAX_SYSTEM.account_kinds()
+}
+
+#[wasm_bindgen_test]
+async fn the_account_select_offers_exactly_what_the_tax_system_advertises() {
+    // Asserted against the catalogue rather than a written-out list, so the
+    // control cannot silently drift from the system behind it.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "10000", "7", "0")], "cheapest"));
+    let options = harness::qa(&root, ".fld-account option");
+    let values: Vec<String> = options
+        .iter()
+        .map(|o| o.get_attribute("value").unwrap_or_default())
+        .collect();
+    let expected: Vec<String> = kinds().iter().map(|k| k.id.to_string()).collect();
+    assert_eq!(values, expected, "the select must be built from the catalogue");
+}
+
+#[wasm_bindgen_test]
+async fn a_seeded_account_shows_the_seeded_value_not_the_first_option() {
+    // The select trap: props are set before options exist, so a non-default
+    // seeded value silently falls back to the first entry unless `selected=`
+    // drives it. Pick the LAST kind so a fallback would be obvious.
+    let last = kinds().last().expect("the catalogue is not empty").id;
+    let mut r = row("Fund", "10000", "7", "0");
+    r.account_kind = last.into();
+    let root = harness::mount_with(&taxed_state(vec![r], "cheapest"));
+
+    let select = harness::q(&root, ".fld-account select");
+    let select: web_sys::HtmlSelectElement = select.dyn_into().unwrap();
+    assert_eq!(select.value(), last);
+}
+
+#[wasm_bindgen_test]
+async fn the_cost_box_follows_the_account_flag_not_a_named_wrapper() {
+    // Shown for kinds whose `needs_cost_basis` is set, and only those — driven
+    // by the catalogue flag, never by matching an account id in the markup.
+    let wants = kinds()
+        .iter()
+        .find(|k| k.needs_cost_basis)
+        .expect("some kind is taxed on the gain");
+    let plain = kinds()
+        .iter()
+        .find(|k| !k.needs_cost_basis)
+        .expect("some kind is not");
+
+    let mut r = row("Fund", "10000", "7", "0");
+    r.account_kind = wants.id.into();
+    let root = harness::mount_with(&taxed_state(vec![r], "cheapest"));
+    assert!(
+        harness::q_opt(&root, ".fld-basis").is_some(),
+        "a gains-taxed account asks what it cost"
+    );
+
+    let select = harness::q(&root, ".fld-account select");
+    let sel: web_sys::HtmlSelectElement = select.clone().dyn_into().unwrap();
+    sel.set_value(plain.id);
+    harness::dispatch_change(&select).await;
+    assert!(
+        harness::q_opt(&root, ".fld-basis").is_none(),
+        "and an account that ignores the figure must not ask for it"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn the_account_picker_is_drawdown_only() {
+    // In deposits mode the account changes nothing about the numbers, so an
+    // inert control that looks like it matters would be worse than none — and
+    // hiding it keeps the aligned four-field row exactly as it was before
+    // accounts existed.
+    let deposits =
+        harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    assert!(harness::q_opt(&deposits, ".fld-account").is_none());
+    assert!(
+        !harness::any_text(&deposits, ".breakdown th", "Account"),
+        "and the breakdown must not name accounts the reader cannot see or change"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn the_tax_controls_appear_only_while_drawing_down() {
+    let deposits =
+        harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    assert!(harness::q_opt(&deposits, ".tax-settings").is_none());
+
+    let drawing =
+        harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    assert!(harness::q_opt(&drawing, ".tax-settings").is_some());
+}
+
+#[wasm_bindgen_test]
+async fn the_tax_details_are_inert_while_splitting_pro_rata() {
+    // Pro-rata ignores tax entirely, so asking for other income and an age would
+    // imply they changed something. The order picker is still there.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], ""));
+    assert!(harness::q_opt(&root, "#strategy").is_some(), "the picker is always offered");
+    assert!(
+        harness::q_opt(&root, "#other-income").is_none(),
+        "but the tax details it does not use are not"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn seeded_tax_details_apply_when_they_mount() {
+    let mut s = taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest");
+    s.other_income = "12000".into();
+    let root = harness::mount_with(&s);
+    // bind_value's mount-time effect is a microtask; let it apply before reading.
+    harness::settle().await;
+
+    assert_eq!(harness::input_by_id(&root, "other-income").value(), "12000");
+    assert_eq!(harness::input_by_id(&root, "age").value(), "60");
+}
+
+#[wasm_bindgen_test]
+async fn an_invalid_other_income_marks_that_control_and_no_other() {
+    let root =
+        harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    harness::settle().await;
+
+    let income = harness::input_by_id(&root, "other-income");
+    harness::type_into(&income, "not a number").await;
+
+    assert_eq!(income.get_attribute("aria-invalid").as_deref(), Some("true"));
+    assert_eq!(
+        income.get_attribute("aria-describedby").as_deref(),
+        Some("calc-error"),
+        "the message must be read out with the field it belongs to"
+    );
+    let withdrawal = harness::input_by_id(&root, "withdrawal");
+    assert!(
+        withdrawal.get_attribute("aria-invalid").is_none(),
+        "only the offending control is flagged"
+    );
+}
+
+// --- the strategy comparison ------------------------------------------------
+
+#[wasm_bindgen_test]
+async fn the_comparison_lists_every_strategy_and_ranks_none_of_them() {
+    let root =
+        harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    let rows = harness::qa(&root, ".strategy-compare tbody tr");
+    assert_eq!(rows.len(), app::strategy::candidates().len(), "every candidate gets a row");
+
+    // No ranking, no winner, no delta. Reporting several axes without ordering
+    // them is the design, so a "best" marker appearing here is a regression.
+    let html = harness::q(&root, ".strategy-compare").inner_html().to_lowercase();
+    for banned in ["recommend", "saves you", "winner"] {
+        assert!(!html.contains(banned), "the table must not rank: found '{banned}'");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn the_comparison_lives_in_its_own_panel_with_explained_headings() {
+    let root =
+        harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    // Its own panel, not tucked below the breakdown table.
+    let panel = harness::q_opt(&root, ".panel-strategy").expect("the comparison has its own panel");
+    assert!(
+        panel.query_selector(".strategy-compare").unwrap().is_some(),
+        "the comparison table lives inside that panel"
+    );
+    // Every column heading and every strategy row explains itself on hover.
+    for th in harness::qa(&root, ".strategy-compare thead th") {
+        assert!(
+            !th.get_attribute("title").unwrap_or_default().is_empty(),
+            "each column heading carries a tooltip"
+        );
+    }
+    for th in harness::qa(&root, ".strategy-compare tbody th[scope='row']") {
+        assert!(
+            !th.get_attribute("title").unwrap_or_default().is_empty(),
+            "each strategy row says what it does"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+async fn the_comparison_does_not_dim_the_projection() {
+    // It is a separate memo for exactly this reason: a strategy that empties the
+    // pot early is not an input error and must leave the panels alone.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "10000", "0", "0")], "cheapest"));
+    for body in harness::qa(&root, ".results-body") {
+        assert!(
+            !body.class_list().contains("stale"),
+            "a strategy that runs out must not dim the projection"
+        );
+    }
+}
+
+// --- the freshness line -----------------------------------------------------
+
+#[wasm_bindgen_test]
+async fn tax_figures_always_carry_the_rules_they_used() {
+    let root =
+        harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    let line = harness::text(&root, ".tax-asof");
+    assert!(
+        line.contains(app::convert::TAX_SYSTEM.rules_label()),
+        "a tax figure without a date is one you cannot judge: {line}"
+    );
+
+    // A stale warning, if shown, must be a note rather than an alert: the page
+    // recomputes on every keystroke and an alert would interrupt a screen reader.
+    if let Some(note) = harness::q_opt(&root, ".tax-stale") {
+        assert_eq!(note.get_attribute("role").as_deref(), Some("note"));
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_pro_rata_projection_advertises_no_tax_rules() {
+    // It never consulted them, so claiming a tax year would be a lie.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], ""));
+    assert!(harness::q_opt(&root, ".tax-asof").is_none());
+}
 fn row(name: &str, value: &str, rate: &str, contribution: &str) -> RowData {
     RowData {
         id: 0,
@@ -488,6 +722,7 @@ fn row(name: &str, value: &str, rate: &str, contribution: &str) -> RowData {
         value: value.into(),
         rate: rate.into(),
         contribution: contribution.into(),
+        ..Default::default()
     }
 }
 
@@ -505,6 +740,12 @@ fn state_of(rows: Vec<RowData>, horizon_value: &str, horizon_unit: &str) -> Shar
         withdrawal: String::new(),
         goal_target: String::new(),
         goal_kind: "topup".into(),
+        strategy: String::new(),
+        rate_cap: String::new(),
+        region: String::new(),
+        other_income: String::new(),
+        age: String::new(),
+        uprate: String::new(),
     }
 }
 
@@ -674,6 +915,13 @@ mod harness {
     /// Fire a bubbling `input` without changing the value (caret test).
     pub async fn dispatch_input(el: &HtmlInputElement) {
         el.dispatch_event(&bubbling("input")).unwrap();
+        settle().await;
+    }
+
+    /// Fire a bubbling `change` — what a `<select>` handler listens for, where
+    /// an `<input>` listens for `input`.
+    pub async fn dispatch_change(el: &Element) {
+        el.dispatch_event(&bubbling("change")).unwrap();
         settle().await;
     }
 

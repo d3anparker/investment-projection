@@ -40,6 +40,28 @@ pub struct ShareState {
     pub goal_target: String,
     #[serde(default = "default_goal_kind")]
     pub goal_kind: String,
+    // The tax controls. Every one is `#[serde(default)]`, which is what lets
+    // them be added *without* a `VERSION` bump: a link written before they
+    // existed decodes with them blank, which is pro-rata and untaxed — exactly
+    // the projection it used to show. Bumping instead would hard-reject every
+    // link already in the wild, so prefer a defaulted field every time.
+    /// The withdrawal-order picker. Blank is pro-rata.
+    #[serde(default)]
+    pub strategy: String,
+    /// The rate cap belonging to the rate-capped strategy, as a percent.
+    #[serde(default)]
+    pub rate_cap: String,
+    /// Which part of the jurisdiction the holder lives in. Blank is the tax
+    /// system's first region.
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub other_income: String,
+    #[serde(default)]
+    pub age: String,
+    /// Annual uprating of tax thresholds, as a percent. Blank freezes them.
+    #[serde(default)]
+    pub uprate: String,
 }
 
 fn default_horizon_value() -> String {
@@ -68,17 +90,30 @@ impl ShareState {
     /// instead of branching between a decoded link and inline defaults. The
     /// `RowData` ids are placeholders; the caller reassigns them.
     pub fn example() -> ShareState {
-        let row = |id, name: &str, value: &str, rate: &str, contribution: &str| RowData {
-            id,
-            name: name.into(),
-            value: value.into(),
-            rate: rate.into(),
-            contribution: contribution.into(),
+        let row = |id, name: &str, value: &str, rate: &str, contribution: &str, kind: &str| {
+            RowData {
+                id,
+                name: name.into(),
+                value: value.into(),
+                rate: rate.into(),
+                contribution: contribution.into(),
+                account_kind: kind.into(),
+                cost_basis: String::new(),
+            }
         };
+        // The example names accounts through the tax system's catalogue rather
+        // than hard-coding ids, so it keeps working if the catalogue changes and
+        // needs no edit at all if the whole system is swapped.
+        let kinds = crate::convert::TAX_SYSTEM.account_kinds();
+        let first = kinds.first().map_or("", |k| k.id);
+        let taxable = kinds
+            .iter()
+            .find(|k| k.needs_cost_basis)
+            .map_or(first, |k| k.id);
         ShareState {
             rows: vec![
-                row(0, "Global Equity Fund", "10000", "7", "200"),
-                row(1, "Government Bond Fund", "5000", "3", "0"),
+                row(0, "Global Equity Fund", "10000", "7", "200", first),
+                row(1, "Government Bond Fund", "5000", "3", "0", taxable),
             ],
             horizon_value: "10".into(),
             horizon_unit: "years".into(),
@@ -88,6 +123,12 @@ impl ShareState {
             withdrawal: String::new(),
             goal_target: String::new(),
             goal_kind: "topup".into(),
+            strategy: String::new(),
+            rate_cap: "20".into(),
+            region: String::new(),
+            other_income: String::new(),
+            age: String::new(),
+            uprate: String::new(),
         }
     }
 }
@@ -169,6 +210,7 @@ mod tests {
             value: value.into(),
             rate: rate.into(),
             contribution: contribution.into(),
+            ..Default::default()
         }
     }
 
@@ -186,6 +228,12 @@ mod tests {
             withdrawal: "2000".into(),
             goal_target: "500000".into(),
             goal_kind: "topup".into(),
+            strategy: "cheapest".into(),
+            rate_cap: "20".into(),
+            region: "narnia".into(),
+            other_income: "12000".into(),
+            age: "60".into(),
+            uprate: "2".into(),
         }
     }
 

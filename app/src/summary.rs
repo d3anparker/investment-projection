@@ -1,7 +1,7 @@
 //! The full-width "Projection" summary panel: the four headline stat cards, and
 //! the placeholder shown when the form is genuinely empty.
 
-use crate::format::{fmt_money, fmt_pct, fmt_signed_money, horizon_label, month_label};
+use crate::format::{fmt_money, fmt_pct, fmt_rate, fmt_signed_money, horizon_label, month_label};
 use crate::panel::stale_body;
 use calc::CalcOutput;
 use leptos::*;
@@ -61,6 +61,29 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
         }
     });
 
+
+    // Tax only appears when some was actually charged, so a pro-rata or untaxed
+    // projection keeps exactly the summary it always had. The label says "taken
+    // out" and "kept" rather than "gross" and "net": the gross figure above is
+    // already labelled "taken out", and these two must read as its two halves.
+    let tax_stat = (!out.tax_paid_total.is_zero()).then(|| {
+        view! {
+            <div class="stat">
+                <span class="stat-label">{format!("Tax over {}", horizon_label(drawdown))}</span>
+                <span class="stat-value">{fmt_money(out.tax_paid_total)}</span>
+                <span class="stat-sub">{fmt_rate(out.effective_tax_rate)}</span>
+                <span class="stat-note">"of what you took out"</span>
+            </div>
+        }
+    });
+    let net_stat = (!out.tax_paid_total.is_zero()).then(|| {
+        view! {
+            <div class="stat">
+                <span class="stat-label">{format!("Kept over {}", horizon_label(drawdown))}</span>
+                <span class="stat-value">{fmt_money(out.net_withdrawn_total)}</span>
+            </div>
+        }
+    });
     // The headline of a drawdown: when the whole portfolio empties before the
     // drawdown period is up, say so plainly. It is the point of the feature, so it
     // sits above the stat cards rather than as one more number among them.
@@ -90,6 +113,8 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
             {handover_stat}
             {contributions_stat}
             {withdrawals_stat}
+            {tax_stat}
+            {net_stat}
             <div class="stat">
                 // The label carries the direction too, so gain vs loss does not
                 // rest on green-vs-red alone.

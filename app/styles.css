@@ -11,6 +11,9 @@
   --good: #35c98a;
   --bad: #ff6b6b;
   --bad-soft: rgba(255, 107, 107, 0.12);
+  /* Caveats that are not failures (stale tax figures). Checked against
+     --panel-2, the surface it actually sits on, in both themes. */
+  --warn: #e0a83a;
   --radius: 12px;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
@@ -33,6 +36,7 @@
     --good: #0b7346;
     --bad: #bc2626;
     --bad-soft: rgba(188, 38, 38, 0.07);
+    --warn: #9a6206;
     --shadow: 0 8px 24px rgba(16, 23, 34, 0.08);
   }
 }
@@ -139,6 +143,14 @@ body {
      space; hoisting the summary out shortens the results column and gives the
      numbers the width they deserve as the page's answer. */
   .panel-summary {
+    grid-column: 1 / -1;
+  }
+
+  /* The strategy comparison spans both columns as a full-width row below the
+     form and the breakdown — the same reasoning as the summary: its
+     seven-column money table needs the width, and it reads as the page's
+     answer rather than one column's detail. */
+  .panel-strategy {
     grid-column: 1 / -1;
   }
 
@@ -884,4 +896,136 @@ input[type="number"]::-webkit-inner-spin-button {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* Drawdown mode adds an account picker to every row, and a cost box to some of
+   them — seven fields where the aligned grid above was already tight enough to
+   need a px floor on the rate track. Rather than squeeze two more columns in,
+   the row falls back to the labelled-card layout the mobile breakpoint already
+   uses: it handles any number of fields, the labels stay visible so nothing
+   depends on a header row lining up, and drawdown is exactly when a row has more
+   to say. The shared header is dropped with it, since it could no longer
+   describe the columns. */
+.inv-editor.with-accounts .inv-head {
+  display: none;
+}
+
+@media (min-width: 620px) {
+  .inv-editor.with-accounts .inv-row {
+    /* Auto-fit rather than a fixed template: the cost field is conditional, so
+       the track count varies row by row and between rows in the same list. */
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    align-items: end;
+    padding: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    margin-bottom: 10px;
+  }
+
+  /* Restore the visible labels the aligned layout hides: without a header row
+     they are the only thing naming each field. */
+  .inv-editor.with-accounts .fld-lbl {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0 0 4px;
+    clip: auto;
+    clip-path: none;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  /* The remove button sits with the fields rather than in a track of its own. */
+  .inv-editor.with-accounts .btn-remove {
+    align-self: end;
+  }
+}
+
+.fld-account select,
+.fld-basis input {
+  width: 100%;
+}
+
+/* the withdrawal order and the tax details it needs */
+.tax-settings {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.tax-settings legend {
+  padding: 0 6px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.tax-settings .period-row {
+  margin-top: 8px;
+}
+
+.tax-settings input[type="text"] {
+  width: 96px;
+}
+
+.tax-settings select {
+  width: auto;
+  max-width: 100%;
+}
+
+/* the strategy comparison */
+/* The comparison now has its own panel (`.panel-strategy`), so it no longer
+   needs the rule that divided it from the breakdown it used to sit under. The
+   panel's `<h2>` provides the separation. */
+.strategy-compare th[scope="col"][title],
+.strategy-compare th[scope="row"][title] {
+  /* Signal the tooltip: a help cursor plus a faint dotted underline, the
+     conventional "there is more here on hover" affordance. Keyboard/touch
+     users get the same explanation from the caption and the descriptive
+     labels, so nothing rests on the tooltip alone. */
+  cursor: help;
+  text-decoration: underline dotted var(--muted);
+  text-underline-offset: 3px;
+}
+
+/* The reason a strategy could not run, or a caveat about the figures beside it.
+   Block-level under the label so it never competes with the numbers. */
+.strategy-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.strategy-compare th[scope="row"] {
+  text-align: left;
+  font-weight: 600;
+  max-width: 22ch;
+}
+
+/* which rules the tax figures came from, and when they were checked */
+.tax-asof {
+  margin: 12px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+/* Stale figures are a caveat, not a failure: the projection still ran and the
+   page is still usable, so this reads as a note rather than borrowing the error
+   styling. */
+.tax-stale {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
 }

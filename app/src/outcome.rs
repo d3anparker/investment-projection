@@ -59,6 +59,29 @@ impl Outcome {
     pub fn flags_withdrawal(&self) -> bool {
         matches!(self.error().and_then(|e| e.field), Some(Field::Withdrawal))
     }
+
+    pub fn flags_other_income(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::OtherIncome))
+    }
+
+    /// Age and region share the age control's neighbourhood in the form, but a
+    /// bad region is the region select's problem, so they stay separate.
+    pub fn flags_age(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::Age))
+    }
+
+    pub fn flags_region(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::Region))
+    }
+
+    /// The withdrawal-order picker, and the rate cap that belongs to it.
+    pub fn flags_strategy(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::Strategy))
+    }
+
+    pub fn flags_uprate(&self) -> bool {
+        matches!(self.error().and_then(|e| e.field), Some(Field::Uprate))
+    }
 }
 
 /// `aria-invalid`/`aria-describedby` values for a control, or `None` to leave
@@ -90,10 +113,12 @@ mod tests {
                 value: "1000".into(),
                 rate: "7".into(),
                 contribution: "0".into(),
+                ..Default::default()
             }],
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
             plan: Plan::Deposits,
+            tax: None,
         };
         Outcome { result: calculate(&input), row_ids: vec![0] }
     }

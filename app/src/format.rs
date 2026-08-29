@@ -16,12 +16,19 @@ pub fn group_thousands(int_digits: &str) -> String {
     out
 }
 
-/// Format a monetary amount as `£1,234.56` (with a leading `-` when negative).
+/// The currency to print amounts in, taken from the active tax system rather
+/// than hard-coded — the last place the render path assumed a jurisdiction.
+pub fn currency() -> &'static str {
+    crate::convert::TAX_SYSTEM.currency_symbol()
+}
+
+/// Format a monetary amount as `1,234.56` behind the active currency symbol
+/// (with a leading `-` when negative).
 pub fn fmt_money(d: Decimal) -> String {
     let neg = d.is_sign_negative();
     let s = format!("{:.2}", d.abs());
     let (int, frac) = s.split_once('.').unwrap_or((s.as_str(), "00"));
-    format!("{}\u{00a3}{}.{}", if neg { "-" } else { "" }, group_thousands(int), frac)
+    format!("{}{}{}.{}", if neg { "-" } else { "" }, currency(), group_thousands(int), frac)
 }
 
 /// Format a monetary amount with an explicit sign: `+£1,234.56` / `-£1,234.56`.
@@ -46,6 +53,16 @@ pub fn fmt_pct(fraction: Decimal) -> String {
     let p = (fraction * Decimal::from(100u32)).round_dp(2);
     let sign = if p.is_sign_positive() && !p.is_zero() { "+" } else { "" };
     format!("{}{:.2}%", sign, p)
+}
+
+/// Format a fraction as a plain percentage, with no sign.
+///
+/// [`fmt_pct`] exists to show *direction* (a gain or a loss), so it prepends a
+/// `+`. A rate that has no direction -- a share of something, like tax as a
+/// proportion of what was taken out -- must not borrow that `+`: "+18.42%" reads
+/// as a rate that went up by 18.42%.
+pub fn fmt_rate(fraction: Decimal) -> String {
+    format!("{:.2}%", (fraction * Decimal::from(100u32)).round_dp(2))
 }
 
 /// Label one point on the projection timeline, for the chart's scrub readout:

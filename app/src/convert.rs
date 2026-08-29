@@ -13,12 +13,19 @@
 //! [`FormInput`]/[`RowData`] snapshot the reactive form down to plain strings for
 //! exactly that reason.
 
-use calc::{CalcInput, InvestmentInput, Plan, Unit};
+use calc::{CalcInput, InvestmentInput, Plan, Strategy, TaxContext, Unit};
+
+/// The tax system this build of the app is wired to.
+///
+/// **The only place the app names a jurisdiction.** Every control that mentions
+/// an account, a region or a currency is populated from this, so swapping the
+/// line swaps the whole tax model and nothing else in `app` changes.
+pub const TAX_SYSTEM: &dyn taxkit::TaxSystem = &uktax::UK;
 
 /// A plain-string snapshot of one editor row, decoupled from the reactive
 /// `Row`'s signals so the input-building logic can be tested without a runtime.
 /// `Clone` so it can also carry a projection's form state into [`crate::share`].
-#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RowData {
     // The id is positional bookkeeping for the reactive layer, not part of the
     // shared state: the codec drops it on the way out and reassigns it by row
@@ -29,6 +36,16 @@ pub struct RowData {
     pub value: String,
     pub rate: String,
     pub contribution: String,
+    /// Which account kind the holding sits in, as an id from the active tax
+    /// system's catalogue. `#[serde(default)]` so links written before accounts
+    /// existed still decode — they come back blank, which resolves to the first
+    /// (untaxed) kind and reproduces exactly what they used to show.
+    #[serde(default)]
+    pub account_kind: String,
+    /// What the holding originally cost. Only shown, and only consulted, for
+    /// account kinds whose `needs_cost_basis` is set.
+    #[serde(default)]
+    pub cost_basis: String,
 }
 
 /// A plain-string snapshot of the whole form, decoupled from the signals. The
@@ -46,6 +63,16 @@ pub struct FormInput {
     pub drawdown_value: String,
     pub drawdown_unit: String,
     pub withdrawal: String,
+    /// The withdrawal-order picker's value. Blank is pro-rata, which is what
+    /// every link written before strategies existed decodes to.
+    pub strategy: String,
+    /// The rate cap that belongs to the rate-capped strategy, as a percent.
+    pub rate_cap: String,
+    /// Portfolio-level tax details. All blank means an untaxed projection.
+    pub region: String,
+    pub other_income: String,
+    pub age: String,
+    pub uprate: String,
 }
 
 /// Build the `calc` input from the current form, dropping blank rows. Returns the
@@ -76,6 +103,10 @@ pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
                 value: blank_zero(&r.value),
                 rate: blank_zero(&r.rate),
                 contribution: blank_zero(&r.contribution),
+                account_kind: kind_from(&r.account_kind),
+                // Left exactly as typed: `calc` reads a blank as "today's
+                // value", which is not the same thing as zero.
+                cost_basis: r.cost_basis.clone(),
             })
         })
         .collect();
@@ -84,7 +115,8 @@ pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
         investments,
         horizon_value: blank_zero(&f.horizon_value),
         horizon_unit: unit_from(&f.horizon_unit),
-        plan: plan_from(&f.plan, &f.drawdown_value, &f.drawdown_unit, &f.withdrawal),
+        plan: plan_from(f),
+        tax: tax_from(f),
     };
     (input, row_ids)
 }
@@ -112,17 +144,111 @@ pub fn unit_from(s: &str) -> Unit {
 /// The top-level mode → `calc::Plan`. Anything other than `"drawdown"` (including
 /// a blank from a pre-mode shared link) is the deposits default, so the drawdown
 /// period and withdrawal are only read when actually drawing down.
-pub fn plan_from(plan: &str, drawdown_value: &str, drawdown_unit: &str, withdrawal: &str) -> Plan {
-    if plan == "drawdown" {
+pub fn plan_from(f: &FormInput) -> Plan {
+    if f.plan == "drawdown" {
         Plan::Drawdown {
-            drawdown_value: blank_zero(drawdown_value),
-            drawdown_unit: unit_from(drawdown_unit),
+            drawdown_value: blank_zero(&f.drawdown_value),
+            drawdown_unit: unit_from(&f.drawdown_unit),
             // A blank withdrawal is a flat drawdown (zero), which `calc` accepts.
-            withdrawal: blank_zero(withdrawal),
+            withdrawal: blank_zero(&f.withdrawal),
+            strategy: strategy_from(&f.strategy, &f.rate_cap),
         }
     } else {
         Plan::Deposits
     }
+}
+
+// --- the tax controls -------------------------------------------------------
+//
+// Every resolver below is deliberately permissive in the same way `unit_from`
+// is: an unrecognised value falls back to the default rather than erroring, so a
+// link from an older build, or one written against a different tax system,
+// still projects instead of showing a validation message the reader cannot act
+// on. Genuine mistakes the user *can* fix — a nonsensical amount, an
+// out-of-range age — are `calc`'s business and come back as a `CalcError`.
+
+/// Ids the strategy `<select>` uses. Kept here rather than inline in the markup
+/// so the select, the share codec and the resolver cannot drift apart.
+pub const STRATEGY_PRO_RATA: &str = "pro-rata";
+pub const STRATEGY_CONVENTIONAL: &str = "conventional";
+pub const STRATEGY_CHEAPEST: &str = "cheapest";
+pub const STRATEGY_PRESERVE: &str = "preserve";
+pub const STRATEGY_CAPPED: &str = "capped";
+
+/// The withdrawal-order picker → `calc::Strategy`.
+///
+/// The conventional order is asked of the *tax system*, never written here:
+/// which accounts are conventionally spent first follows from how they are
+/// taxed, so it is jurisdiction-specific knowledge.
+pub fn strategy_from(strategy: &str, rate_cap: &str) -> Strategy {
+    match strategy {
+        STRATEGY_CONVENTIONAL => Strategy::Ordered {
+            order: TAX_SYSTEM
+                .conventional_order()
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        },
+        STRATEGY_CHEAPEST => Strategy::CheapestFirst,
+        STRATEGY_PRESERVE => Strategy::PreserveGrowth,
+        STRATEGY_CAPPED => Strategy::RateCapped { max_rate: blank_zero(rate_cap) },
+        _ => Strategy::ProRata,
+    }
+}
+
+/// An account-kind id, checked against the catalogue. An id the active system
+/// does not advertise falls back to the first kind rather than erroring, so a
+/// link built against a different catalogue still opens.
+pub fn kind_from(id: &str) -> String {
+    let id = id.trim();
+    if TAX_SYSTEM.account_kind(id).is_some() {
+        id.to_string()
+    } else {
+        TAX_SYSTEM.account_kinds().first().map_or(String::new(), |k| k.id.to_string())
+    }
+}
+
+/// A region id, checked the same way.
+pub fn region_from(id: &str) -> String {
+    let id = id.trim();
+    if TAX_SYSTEM.region(id).is_some() {
+        id.to_string()
+    } else {
+        TAX_SYSTEM.regions().first().map_or(String::new(), |r| r.id.to_string())
+    }
+}
+
+/// The portfolio-level tax details, or `None` for an untaxed projection.
+///
+/// Only built while drawing down, and only for a strategy that is not pro-rata:
+/// pro-rata ignores tax entirely, and handing it a context would be misleading
+/// rather than merely wasteful — the output would advertise a tax year it never
+/// used.
+pub fn tax_from(f: &FormInput) -> Option<TaxContext> {
+    if strategy_from(&f.strategy, &f.rate_cap) == Strategy::ProRata {
+        return None;
+    }
+    tax_context(f)
+}
+
+/// The tax details the form describes, whatever order is currently selected.
+///
+/// [`tax_from`] withholds this from a pro-rata projection, because pro-rata
+/// ignores tax and a context would make the output claim a tax year it never
+/// used. The strategy comparison is the one caller for which that reasoning
+/// inverts — its whole job is to show what the *other* orders would do, so it
+/// asks for the context directly.
+pub fn tax_context(f: &FormInput) -> Option<TaxContext> {
+    if f.plan != "drawdown" {
+        return None;
+    }
+    Some(TaxContext {
+        system: TAX_SYSTEM,
+        region: region_from(&f.region),
+        other_income: f.other_income.clone(),
+        age: f.age.clone(),
+        uprate: f.uprate.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -136,6 +262,7 @@ mod tests {
             value: value.into(),
             rate: rate.into(),
             contribution: contribution.into(),
+            ..Default::default()
         }
     }
 
@@ -148,6 +275,22 @@ mod tests {
             drawdown_value: "30".into(),
             drawdown_unit: "years".into(),
             withdrawal: String::new(),
+            strategy: String::new(),
+            rate_cap: String::new(),
+            region: String::new(),
+            other_income: String::new(),
+            age: String::new(),
+            uprate: String::new(),
+        }
+    }
+
+    /// A drawdown form, for the plan/tax resolvers.
+    fn drawing(withdrawal: &str, strategy: &str) -> FormInput {
+        FormInput {
+            plan: "drawdown".into(),
+            withdrawal: withdrawal.into(),
+            strategy: strategy.into(),
+            ..form(vec![], "10", "years")
         }
     }
 
@@ -172,31 +315,91 @@ mod tests {
 
     #[test]
     fn plan_from_defaults_to_deposits() {
-        assert!(plan_from("deposits", "30", "years", "2000") == Plan::Deposits);
+        assert!(plan_from(&form(vec![], "10", "years")) == Plan::Deposits);
         // Blank (a pre-mode shared link) and anything unknown are deposits.
-        assert!(plan_from("", "30", "years", "2000") == Plan::Deposits);
-        assert!(plan_from("nonsense", "30", "years", "2000") == Plan::Deposits);
+        for mode in ["", "nonsense"] {
+            let f = FormInput { plan: mode.into(), ..form(vec![], "10", "years") };
+            assert!(plan_from(&f) == Plan::Deposits, "{mode}");
+        }
     }
 
     #[test]
     fn plan_from_carries_the_drawdown_fields() {
-        let p = plan_from("drawdown", "30", "years", "2000");
+        let p = plan_from(&drawing("2000", ""));
         assert!(
             p == Plan::Drawdown {
                 drawdown_value: "30".into(),
                 drawdown_unit: Unit::Years,
                 withdrawal: "2000".into(),
+                strategy: Strategy::ProRata,
             }
         );
         // A blank withdrawal becomes "0" (a flat drawdown), never an empty string.
-        let blank = plan_from("drawdown", "30", "months", "  ");
-        assert!(
-            blank == Plan::Drawdown {
-                drawdown_value: "30".into(),
-                drawdown_unit: Unit::Months,
-                withdrawal: "0".into(),
-            }
+        let blank = plan_from(&drawing("  ", ""));
+        assert!(matches!(
+            blank,
+            Plan::Drawdown { ref withdrawal, .. } if withdrawal == "0"
+        ));
+    }
+
+    #[test]
+    fn strategy_from_defaults_to_pro_rata() {
+        // A link written before strategies existed, or against a build that had
+        // different ones, must still project rather than refuse to open.
+        for value in ["", "pro-rata", "nonsense"] {
+            assert_eq!(strategy_from(value, ""), Strategy::ProRata, "{value}");
+        }
+        assert_eq!(strategy_from(STRATEGY_CHEAPEST, ""), Strategy::CheapestFirst);
+        assert_eq!(strategy_from(STRATEGY_PRESERVE, ""), Strategy::PreserveGrowth);
+        assert_eq!(
+            strategy_from(STRATEGY_CAPPED, "20"),
+            Strategy::RateCapped { max_rate: "20".into() }
         );
+        // A blank cap is zero, not an empty string calc would reject.
+        assert_eq!(
+            strategy_from(STRATEGY_CAPPED, ""),
+            Strategy::RateCapped { max_rate: "0".into() }
+        );
+    }
+
+    #[test]
+    fn the_conventional_order_comes_from_the_tax_system() {
+        // Which accounts are spent first follows from how they are taxed, so it
+        // is the tax system's judgement and must never be written out here.
+        let expected: Vec<String> = TAX_SYSTEM
+            .conventional_order()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(strategy_from(STRATEGY_CONVENTIONAL, ""), Strategy::Ordered { order: expected });
+    }
+
+    #[test]
+    fn unknown_account_and_region_ids_fall_back_rather_than_erroring() {
+        let first_kind = TAX_SYSTEM.account_kinds()[0].id;
+        assert_eq!(kind_from("not_a_real_account"), first_kind);
+        assert_eq!(kind_from(""), first_kind, "a pre-accounts link is untaxed");
+        // A real id survives, whitespace and all.
+        let real = TAX_SYSTEM.account_kinds().last().unwrap().id;
+        assert_eq!(kind_from(&format!("  {real} ")), real);
+
+        let first_region = TAX_SYSTEM.regions()[0].id;
+        assert_eq!(region_from("narnia"), first_region);
+        assert_eq!(region_from(""), first_region);
+    }
+
+    #[test]
+    fn tax_details_are_withheld_from_a_pro_rata_projection() {
+        // Pro-rata ignores tax entirely. Handing `calc` a context anyway would
+        // make the output advertise a tax year it never used.
+        assert!(tax_from(&drawing("2000", "")).is_none());
+        assert!(tax_from(&drawing("2000", STRATEGY_PRO_RATA)).is_none());
+        // And a deposits projection never has one, whatever the picker says.
+        let deposits = FormInput { strategy: STRATEGY_CHEAPEST.into(), ..form(vec![], "10", "years") };
+        assert!(tax_from(&deposits).is_none());
+
+        let taxed = tax_from(&drawing("2000", STRATEGY_CHEAPEST)).expect("a tax-aware order needs one");
+        assert_eq!(taxed.region, TAX_SYSTEM.regions()[0].id);
     }
 
     #[test]
@@ -256,6 +459,7 @@ mod tests {
                 drawdown_value: "30".into(),
                 drawdown_unit: Unit::Years,
                 withdrawal: "2000".into(),
+                strategy: Strategy::ProRata,
             }
         );
     }

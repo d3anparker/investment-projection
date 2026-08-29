@@ -6,3 +6,11 @@ description = "Exact-decimal investment projection core (pure library, natively 
 
 [dependencies]
 rust_decimal = { version = "1", features = ["maths"] }
+# The tax *abstraction* only. `calc` must never depend on a concrete tax system
+# -- see the jurisdiction rule in CLAUDE.md.
+taxkit = { path = "../taxkit" }
+
+[dev-dependencies]
+# The fictional system the drawdown tests run against, so they pin the engine
+# rather than one jurisdiction's figures.
+taxkit = { path = "../taxkit", features = ["mock"] }

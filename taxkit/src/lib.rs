@@ -371,6 +371,22 @@ pub trait TaxSession {
     /// tax, right now. A pure sort key in `0.0..=1.0`; higher is cheaper.
     fn marginal_keep(&self, pot: &Pot) -> Decimal;
 
+    /// How much could come out of `pot` at that rate before it steps up, or
+    /// `None` if it never does.
+    ///
+    /// This exists to break ties between accounts that are equally cheap *right
+    /// now*. One that is cheap because an allowance has not been spent is
+    /// use-it-or-lose-it and should go first; one that is cheap indefinitely can
+    /// wait. Without this a caller cannot tell them apart and will let
+    /// allowances expire unclaimed — which is the single behaviour a tax-aware
+    /// withdrawal order exists to get right.
+    ///
+    /// Returning `None` is always safe: it makes a caller's tie-break less
+    /// clever, never wrong. Hence the default.
+    fn marginal_headroom(&self, _pot: &Pot) -> Option<Decimal> {
+        None
+    }
+
     /// Take money out of `pot`, aiming to deliver `net_wanted`, and commit the
     /// result to the ledger.
     ///

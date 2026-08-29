@@ -3,7 +3,7 @@
 //! CSS custom properties, which resolve because the SVG is injected into the
 //! live DOM.
 
-use crate::format::group_thousands;
+use crate::format::{currency, group_thousands};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
@@ -46,10 +46,10 @@ fn fmt_axis(v: f64) -> String {
             if let Some(trimmed) = s.strip_suffix(".0") {
                 s = trimmed.to_string();
             }
-            return format!("{sign}\u{00a3}{s}{suffix}");
+            return format!("{sign}{}{s}{suffix}", currency());
         }
     }
-    format!("{sign}\u{00a3}{}", group_thousands(&(a as i64).to_string()))
+    format!("{sign}{}{}", currency(), group_thousands(&(a as i64).to_string()))
 }
 
 /// A "nice" step (1, 2, 3, 5, …) giving roughly six or fewer intervals over `total`.
