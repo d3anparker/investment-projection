@@ -95,6 +95,7 @@ mod tests {
             horizon_value: "10".into(),
             horizon_unit: Unit::Years,
             plan: Plan::Deposits,
+            currency: String::new(),
             tax: None,
         };
         Outcome { result: calculate(&input), row_ids: vec![0] }

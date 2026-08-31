@@ -116,6 +116,9 @@ pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
         horizon_value: blank_zero(&f.horizon_value),
         horizon_unit: unit_from(&f.horizon_unit),
         plan: plan_from(f),
+        // The one jurisdiction is named here (`TAX_SYSTEM`); `calc` prints
+        // whatever symbol it is handed, in taxed and untaxed modes alike.
+        currency: TAX_SYSTEM.currency_symbol().to_string(),
         tax: tax_from(f),
     };
     (input, row_ids)
@@ -167,33 +170,106 @@ pub fn plan_from(f: &FormInput) -> Plan {
 // on. Genuine mistakes the user *can* fix — a nonsensical amount, an
 // out-of-range age — are `calc`'s business and come back as a `CalcError`.
 
-/// Ids the strategy `<select>` uses. Kept here rather than inline in the markup
-/// so the select, the share codec and the resolver cannot drift apart.
-pub const STRATEGY_PRO_RATA: &str = "pro-rata";
-pub const STRATEGY_CONVENTIONAL: &str = "conventional";
-pub const STRATEGY_CHEAPEST: &str = "cheapest";
-pub const STRATEGY_PRESERVE: &str = "preserve";
-pub const STRATEGY_CAPPED: &str = "capped";
-
-/// The withdrawal-order picker → `calc::Strategy`.
+/// The withdrawal strategies the UI offers, as **one** catalogue.
 ///
-/// The conventional order is asked of the *tax system*, never written here:
-/// which accounts are conventionally spent first follows from how they are
-/// taxed, so it is jurisdiction-specific knowledge.
-pub fn strategy_from(strategy: &str, rate_cap: &str) -> Strategy {
-    match strategy {
-        STRATEGY_CONVENTIONAL => Strategy::Ordered {
-            order: TAX_SYSTEM
-                .conventional_order()
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-        },
-        STRATEGY_CHEAPEST => Strategy::CheapestFirst,
-        STRATEGY_PRESERVE => Strategy::PreserveGrowth,
-        STRATEGY_CAPPED => Strategy::RateCapped { max_rate: blank_zero(rate_cap) },
-        _ => Strategy::ProRata,
+/// Every place that used to enumerate the strategies independently — the picker
+/// `<select>` in `app.rs`, the share codec's stored id, this resolver, and the
+/// comparison panel in `strategy.rs` — now iterates [`StrategyChoice::ALL`] or
+/// matches a `StrategyChoice`. Adding one is a single new variant, and the
+/// compiler then forces every `match self` below to handle it, so a strategy can
+/// no longer compile clean while appearing in none of the lists.
+///
+/// The variant order is the presentation order the picker and the comparison
+/// both follow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StrategyChoice {
+    ProRata,
+    Conventional,
+    Cheapest,
+    Preserve,
+    Capped,
+}
+
+impl StrategyChoice {
+    /// The catalogue in presentation order. The picker renders one option per
+    /// entry; the comparison shows the [`in_comparison`](Self::in_comparison)
+    /// subset.
+    pub const ALL: [StrategyChoice; 5] = [
+        StrategyChoice::ProRata,
+        StrategyChoice::Conventional,
+        StrategyChoice::Cheapest,
+        StrategyChoice::Preserve,
+        StrategyChoice::Capped,
+    ];
+
+    /// The id carried in the form state and the shareable link. A `const fn` so a
+    /// `match` on the string still reads as exhaustive against these literals.
+    pub const fn id(self) -> &'static str {
+        match self {
+            StrategyChoice::ProRata => "pro-rata",
+            StrategyChoice::Conventional => "conventional",
+            StrategyChoice::Cheapest => "cheapest",
+            StrategyChoice::Preserve => "preserve",
+            StrategyChoice::Capped => "capped",
+        }
     }
+
+    /// Resolve a stored id back to a choice. An unknown id — an older link, or one
+    /// written against a different tax system — falls back to pro-rata, the
+    /// untaxed default, so the link still projects rather than refusing to open.
+    pub fn from_id(id: &str) -> StrategyChoice {
+        StrategyChoice::ALL
+            .into_iter()
+            .find(|c| c.id() == id)
+            .unwrap_or(StrategyChoice::ProRata)
+    }
+
+    /// The option text shown in the picker `<select>`. The leading em-dash is
+    /// added by the markup, so it is not repeated here.
+    pub const fn picker_label(self) -> &'static str {
+        match self {
+            StrategyChoice::ProRata => "split across everything",
+            StrategyChoice::Conventional => "in the conventional order",
+            StrategyChoice::Cheapest => "lowest tax this month",
+            StrategyChoice::Preserve => "longest-lasting pot",
+            StrategyChoice::Capped => "staying under a tax rate",
+        }
+    }
+
+    /// Whether the comparison panel shows this strategy as a row. The rate-capped
+    /// order is withheld: it needs a cap figure the comparison does not vary, and
+    /// its point is the constraint rather than a portfolio-wide alternative.
+    pub const fn in_comparison(self) -> bool {
+        !matches!(self, StrategyChoice::Capped)
+    }
+
+    /// Build the `calc::Strategy`. Only the capped choice reads `rate_cap`; the
+    /// conventional order is asked of the *tax system*, never written here, since
+    /// which accounts are spent first follows from how they are taxed.
+    pub fn build(self, rate_cap: &str) -> Strategy {
+        match self {
+            StrategyChoice::ProRata => Strategy::pro_rata(),
+            StrategyChoice::Conventional => Strategy::ordered(conventional_order()),
+            StrategyChoice::Cheapest => Strategy::cheapest_first(),
+            StrategyChoice::Preserve => Strategy::preserve_growth(),
+            StrategyChoice::Capped => Strategy::rate_capped(blank_zero(rate_cap)),
+        }
+    }
+}
+
+/// The tax system's conventional spend order, as owned strings.
+pub fn conventional_order() -> Vec<String> {
+    TAX_SYSTEM
+        .conventional_order()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// The withdrawal-order picker id → `calc::Strategy`. A thin front on
+/// [`StrategyChoice`] for the two callers that hold the raw form strings.
+pub fn strategy_from(strategy: &str, rate_cap: &str) -> Strategy {
+    StrategyChoice::from_id(strategy).build(rate_cap)
 }
 
 /// An account-kind id, checked against the catalogue. An id the active system
@@ -225,7 +301,7 @@ pub fn region_from(id: &str) -> String {
 /// rather than merely wasteful — the output would advertise a tax year it never
 /// used.
 pub fn tax_from(f: &FormInput) -> Option<TaxContext> {
-    if strategy_from(&f.strategy, &f.rate_cap) == Strategy::ProRata {
+    if strategy_from(&f.strategy, &f.rate_cap) == Strategy::pro_rata() {
         return None;
     }
     tax_context(f)
@@ -331,7 +407,7 @@ mod tests {
                 drawdown_value: "30".into(),
                 drawdown_unit: Unit::Years,
                 withdrawal: "2000".into(),
-                strategy: Strategy::ProRata,
+                strategy: Strategy::pro_rata(),
             }
         );
         // A blank withdrawal becomes "0" (a flat drawdown), never an empty string.
@@ -347,19 +423,30 @@ mod tests {
         // A link written before strategies existed, or against a build that had
         // different ones, must still project rather than refuse to open.
         for value in ["", "pro-rata", "nonsense"] {
-            assert_eq!(strategy_from(value, ""), Strategy::ProRata, "{value}");
+            assert_eq!(strategy_from(value, ""), Strategy::pro_rata(), "{value}");
         }
-        assert_eq!(strategy_from(STRATEGY_CHEAPEST, ""), Strategy::CheapestFirst);
-        assert_eq!(strategy_from(STRATEGY_PRESERVE, ""), Strategy::PreserveGrowth);
+        assert_eq!(strategy_from(StrategyChoice::Cheapest.id(), ""), Strategy::cheapest_first());
+        assert_eq!(strategy_from(StrategyChoice::Preserve.id(), ""), Strategy::preserve_growth());
         assert_eq!(
-            strategy_from(STRATEGY_CAPPED, "20"),
-            Strategy::RateCapped { max_rate: "20".into() }
+            strategy_from(StrategyChoice::Capped.id(), "20"),
+            Strategy::rate_capped("20".into())
         );
         // A blank cap is zero, not an empty string calc would reject.
         assert_eq!(
-            strategy_from(STRATEGY_CAPPED, ""),
-            Strategy::RateCapped { max_rate: "0".into() }
+            strategy_from(StrategyChoice::Capped.id(), ""),
+            Strategy::rate_capped("0".into())
         );
+    }
+
+    #[test]
+    fn every_strategy_id_round_trips_through_the_catalogue() {
+        // The catalogue is the single source: a stored id maps back to the same
+        // choice, and nothing but a real id resolves to anything but pro-rata.
+        for choice in StrategyChoice::ALL {
+            assert_eq!(StrategyChoice::from_id(choice.id()), choice, "{}", choice.id());
+        }
+        assert_eq!(StrategyChoice::from_id(""), StrategyChoice::ProRata);
+        assert_eq!(StrategyChoice::from_id("nonsense"), StrategyChoice::ProRata);
     }
 
     #[test]
@@ -371,7 +458,7 @@ mod tests {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        assert_eq!(strategy_from(STRATEGY_CONVENTIONAL, ""), Strategy::Ordered { order: expected });
+        assert_eq!(strategy_from(StrategyChoice::Conventional.id(), ""), Strategy::ordered(expected));
     }
 
     #[test]
@@ -393,12 +480,12 @@ mod tests {
         // Pro-rata ignores tax entirely. Handing `calc` a context anyway would
         // make the output advertise a tax year it never used.
         assert!(tax_from(&drawing("2000", "")).is_none());
-        assert!(tax_from(&drawing("2000", STRATEGY_PRO_RATA)).is_none());
+        assert!(tax_from(&drawing("2000", StrategyChoice::ProRata.id())).is_none());
         // And a deposits projection never has one, whatever the picker says.
-        let deposits = FormInput { strategy: STRATEGY_CHEAPEST.into(), ..form(vec![], "10", "years") };
+        let deposits = FormInput { strategy: StrategyChoice::Cheapest.id().into(), ..form(vec![], "10", "years") };
         assert!(tax_from(&deposits).is_none());
 
-        let taxed = tax_from(&drawing("2000", STRATEGY_CHEAPEST)).expect("a tax-aware order needs one");
+        let taxed = tax_from(&drawing("2000", StrategyChoice::Cheapest.id())).expect("a tax-aware order needs one");
         assert_eq!(taxed.region, TAX_SYSTEM.regions()[0].id);
     }
 
@@ -459,7 +546,7 @@ mod tests {
                 drawdown_value: "30".into(),
                 drawdown_unit: Unit::Years,
                 withdrawal: "2000".into(),
-                strategy: Strategy::ProRata,
+                strategy: Strategy::pro_rata(),
             }
         );
     }

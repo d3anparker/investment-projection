@@ -39,6 +39,51 @@ fn snapshot(rows: RwSignal<Vec<model::Row>>) -> Vec<RowData> {
         .collect()
 }
 
+/// A text `<input>` wired to `sig`, carrying the invalid-state a11y contract —
+/// `aria-invalid` + `aria-describedby` + `.field-invalid`, all driven by `bad` —
+/// in one place rather than repeated per control. The single spelling of that
+/// contract is what stops one control quietly drifting out of step with the rest.
+fn aria_text_input(
+    id: &'static str,
+    inputmode: &'static str,
+    placeholder: &'static str,
+    node_ref: NodeRef<html::Input>,
+    sig: RwSignal<String>,
+    bad: Memo<bool>,
+) -> impl IntoView {
+    view! {
+        <input id=id type="text" inputmode=inputmode placeholder=placeholder node_ref=node_ref
+            aria-invalid=move || invalid_attrs(bad.get()).0
+            aria-describedby=move || invalid_attrs(bad.get()).1
+            class:field-invalid=move || bad.get()
+            on:input=move |ev| sig.set(event_target_value(&ev)) />
+    }
+}
+
+/// One `label → adorned decimal input → trailing words` period-row, the shape the
+/// tax fieldset repeats. `adorn` is the adornment suffix (`"money"` / `"pct"`);
+/// the a11y contract comes from [`aria_text_input`].
+fn adorned_field(
+    id: &'static str,
+    label: &'static str,
+    adorn: &'static str,
+    placeholder: &'static str,
+    suffix: &'static str,
+    node_ref: NodeRef<html::Input>,
+    sig: RwSignal<String>,
+    bad: Memo<bool>,
+) -> impl IntoView {
+    view! {
+        <div class="period-row">
+            <label for=id>{label}</label>
+            <span class=format!("adorn adorn-{adorn}")>
+                {aria_text_input(id, "decimal", placeholder, node_ref, sig, bad)}
+            </span>
+            <span>{suffix}</span>
+        </div>
+    }
+}
+
 /// The current location fragment (`#v=…`), or `None` when there isn't one
 /// (absent or empty). `decode` does the rest — this only reads the string.
 fn read_hash() -> Option<String> {
@@ -138,8 +183,7 @@ pub fn App() -> impl IntoView {
     // a projection that was quietly running pro-rata and ignoring every field
     // in it.
     let tax_aware = move || {
-        is_drawdown()
-            && convert::strategy_from(&strategy.get(), &rate_cap.get()) != calc::Strategy::ProRata
+        is_drawdown() && convert::StrategyChoice::from_id(&strategy.get()) != convert::StrategyChoice::ProRata
     };
 
     // Goal-seek state. The target is blank in the example, which keeps the
@@ -185,19 +229,39 @@ pub fn App() -> impl IntoView {
     // The strategy comparison, a separate memo for the same reason the goal
     // answer is: a strategy that empties the pot early is not an input error, so
     // it must never mark the form stale or dim the projection panels.
-    let comparison = create_memo(move |_| {
-        if !is_drawdown() {
-            return Vec::new();
-        }
-        let f = form_snapshot();
-        let (mut input, _) = convert::build_input(&f);
+    //
+    // It is also *debounced*. `compare` runs four full projections, so on top of
+    // `outcome`'s own it is the heaviest thing on the typing path; recomputing it
+    // per keystroke is what made the comparison the largest cost in the diff.
+    // Instead the input it reads is refreshed only once typing settles, so the
+    // table follows a short beat behind rather than thrashing on every character.
+    // The signal is seeded synchronously (a plain read, no subscription) so the
+    // first render already has the table — the browser suite reads it at mount.
+    let comparison_of = move |f: &FormInput| {
+        let (mut input, _) = convert::build_input(f);
         // The comparison needs tax details whatever order is currently selected —
         // otherwise every tax-aware row reads "fill in the tax details" for a
         // reader who has not yet worked out that those details are the thing
         // that unlocks them. See `convert::tax_context`.
-        input.tax = convert::tax_context(&f);
-        strategy::compare(&input)
+        input.tax = convert::tax_context(f);
+        input
+    };
+    let comparison_input = create_rw_signal(comparison_of(&form_snapshot()));
+    // Re-run on any form edit (through `form_snapshot`), but defer the refresh
+    // behind one shared timeout, cancelling the pending one each keystroke — the
+    // same settle-then-fire shape the error announcement below uses. The mount
+    // run only subscribes; the seed above already covers the first render.
+    create_effect(move |prev: Option<Option<TimeoutHandle>>| -> Option<TimeoutHandle> {
+        let f = form_snapshot();
+        if let Some(Some(handle)) = prev {
+            handle.clear();
+        }
+        if prev.is_none() {
+            return None;
+        }
+        set_timeout_with_handle(move || comparison_input.set(comparison_of(&f)), ANNOUNCE_DELAY).ok()
     });
+    let comparison = create_memo(move |_| comparison_input.with(strategy::compare));
 
     // Read once at mount, not in a memo: the clock is not reactive, and letting
     // a date into the projection would make the same shared link produce
@@ -658,68 +722,37 @@ pub fn App() -> impl IntoView {
                                 <label for="strategy">"Take it"</label>
                                 <select id="strategy"
                                     on:change=move |ev| strategy.set(event_target_value(&ev))>
-                                    <option value=convert::STRATEGY_PRO_RATA
-                                        selected=move || !tax_aware()>
-                                        "\u{2014} split across everything"
-                                    </option>
-                                    <option value=convert::STRATEGY_CONVENTIONAL
-                                        selected=move || strategy.get() == convert::STRATEGY_CONVENTIONAL>
-                                        "\u{2014} in the conventional order"
-                                    </option>
-                                    <option value=convert::STRATEGY_CHEAPEST
-                                        selected=move || strategy.get() == convert::STRATEGY_CHEAPEST>
-                                        "\u{2014} lowest tax this month"
-                                    </option>
-                                    <option value=convert::STRATEGY_PRESERVE
-                                        selected=move || strategy.get() == convert::STRATEGY_PRESERVE>
-                                        "\u{2014} longest-lasting pot"
-                                    </option>
-                                    <option value=convert::STRATEGY_CAPPED
-                                        selected=move || strategy.get() == convert::STRATEGY_CAPPED>
-                                        "\u{2014} staying under a tax rate"
-                                    </option>
+                                    // One option per catalogue entry, so a new
+                                    // strategy appears here without touching the
+                                    // markup. `from_id` maps blank/unknown to
+                                    // pro-rata, which is why that option lights up
+                                    // by default.
+                                    {convert::StrategyChoice::ALL.into_iter().map(|choice| {
+                                        let id = choice.id();
+                                        view! {
+                                            <option value=id
+                                                selected=move || convert::StrategyChoice::from_id(&strategy.get()) == choice>
+                                                {format!("\u{2014} {}", choice.picker_label())}
+                                            </option>
+                                        }
+                                    }).collect_view()}
                                 </select>
                             </div>
 
-                            {move || (strategy.get() == convert::STRATEGY_CAPPED).then(|| view! {
-                                <div class="period-row">
-                                    <label for="rate-cap">"never paying more than"</label>
-                                    <span class="adorn adorn-pct">
-                                        <input id="rate-cap" type="text" inputmode="decimal"
-                                            placeholder="20" node_ref=cap_ref
-                                            aria-invalid=move || invalid_attrs(strategy_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(strategy_bad.get()).1
-                                            class:field-invalid=move || strategy_bad.get()
-                                            on:input=move |ev| rate_cap.set(event_target_value(&ev)) />
-                                    </span>
-                                    <span>"at the margin"</span>
-                                </div>
+                            {move || (convert::StrategyChoice::from_id(&strategy.get()) == convert::StrategyChoice::Capped).then(|| {
+                                adorned_field("rate-cap", "never paying more than", "pct", "20",
+                                    "at the margin", cap_ref, rate_cap, strategy_bad)
                             })}
 
                             // Inert while splitting pro-rata: that ignores tax
                             // entirely, so asking for these would imply they
                             // changed something.
                             {move || tax_aware().then(|| view! {
-                                <div class="period-row">
-                                    <label for="other-income">"Other taxable income"</label>
-                                    <span class="adorn adorn-money">
-                                        <input id="other-income" type="text" inputmode="decimal"
-                                            placeholder="0" node_ref=income_ref
-                                            aria-invalid=move || invalid_attrs(income_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(income_bad.get()).1
-                                            class:field-invalid=move || income_bad.get()
-                                            on:input=move |ev| other_income.set(event_target_value(&ev)) />
-                                    </span>
-                                    <span>"a year"</span>
-                                </div>
+                                {adorned_field("other-income", "Other taxable income", "money", "0",
+                                    "a year", income_ref, other_income, income_bad)}
                                 <div class="period-row">
                                     <label for="age">"Age when it starts"</label>
-                                    <input id="age" type="text" inputmode="numeric"
-                                        placeholder="60" node_ref=age_ref
-                                        aria-invalid=move || invalid_attrs(age_bad.get()).0
-                                        aria-describedby=move || invalid_attrs(age_bad.get()).1
-                                        class:field-invalid=move || age_bad.get()
-                                        on:input=move |ev| age.set(event_target_value(&ev)) />
+                                    {aria_text_input("age", "numeric", "60", age_ref, age, age_bad)}
                                     // A single-region tax system needs no control
                                     // at all, so it gets none rather than a
                                     // pointless one-option select.
@@ -739,18 +772,8 @@ pub fn App() -> impl IntoView {
                                         </select>
                                     })}
                                 </div>
-                                <div class="period-row">
-                                    <label for="uprate">"Tax thresholds rise"</label>
-                                    <span class="adorn adorn-pct">
-                                        <input id="uprate" type="text" inputmode="decimal"
-                                            placeholder="0" node_ref=uprate_ref
-                                            aria-invalid=move || invalid_attrs(uprate_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(uprate_bad.get()).1
-                                            class:field-invalid=move || uprate_bad.get()
-                                            on:input=move |ev| uprate.set(event_target_value(&ev)) />
-                                    </span>
-                                    <span>"a year"</span>
-                                </div>
+                                {adorned_field("uprate", "Tax thresholds rise", "pct", "0",
+                                    "a year", uprate_ref, uprate, uprate_bad)}
                             })}
                         </fieldset>
                         }

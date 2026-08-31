@@ -51,7 +51,7 @@ pub enum Plan {
         /// The portfolio-level monthly withdrawal, as a raw non-negative string
         /// (blank/`"0"` means a flat drawdown — just a longer accumulation).
         ///
-        /// **Gross under [`Strategy::ProRata`], net under every other strategy.**
+        /// **Gross under [`Order::ProRata`], net under every other order.**
         /// Pro-rata predates the tax model and splits the money that *leaves the
         /// investments*; the ordered strategies exist to answer "how do I get
         /// £N into my pocket", which is a question about net.
@@ -61,56 +61,102 @@ pub enum Plan {
     },
 }
 
-/// How a monthly withdrawal is apportioned across the holdings.
-///
-/// Every variant except [`Strategy::ProRata`] treats the withdrawal as a *net*
-/// figure and needs to know what a draw costs, so all but [`Strategy::ProRata`]
-/// and [`Strategy::PreserveGrowth`] require a [`TaxContext`].
+/// How a monthly withdrawal is apportioned across the holdings — the *ordering*
+/// axis of a drawdown [`Strategy`].
 ///
 /// Ordering is expressed over **opaque account-kind ids**, never over a named
 /// enum of wrappers: `calc` carries the ids a [`TaxSystem`] advertises and never
 /// learns what any of them mean.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub enum Strategy {
+pub enum Order {
     /// Split the withdrawal across every holding pro-rata by current value,
     /// rebalanced monthly, ignoring tax entirely. The original behaviour, and
     /// the default: an input that says nothing about tax projects exactly as it
-    /// did before the tax model existed.
+    /// did before the tax model existed, and this is the one order taken *gross*.
     #[default]
     ProRata,
     /// Empty each account kind in turn, in the order given, splitting pro-rata
     /// within a kind. Kinds present in the portfolio but missing from `order`
     /// are appended by their catalogue rank rather than treated as an error.
-    Ordered { order: Vec<String> },
-    /// Each month, take from whichever holding has the lowest marginal tax rate
-    /// at that moment, re-checking at every rate boundary.
-    ///
-    /// Minimises tax *this month* exactly, and deliberately does not look
-    /// further: it will happily drain a tax-free account early and leave a
-    /// wholly taxable one to come out at the top rate. Lifetime-optimal is a
-    /// dynamic program, not a greedy — hence the name.
-    CheapestFirst,
+    ByKind(Vec<String>),
     /// Drain the lowest-returning holding first, so the best compounder is left
     /// to compound. A **non-tax** objective: it needs no [`TaxContext`] at all
     /// and is legal on an untaxed projection.
-    PreserveGrowth,
+    ByReturn,
+    /// Each month, take from whichever holding keeps most of the next pound —
+    /// a dynamic, re-ranked-every-rate-boundary order rather than a fixed one.
+    /// The only order whose month is a greedy argmax rather than a static split.
+    ByMarginalCost,
+}
+
+/// When to stop drawing from a holding — the *stop-rule* axis of a [`Strategy`],
+/// orthogonal to its [`Order`].
+///
+/// For the static orders the answer is always [`Limit::Requirement`]; the rate
+/// boundaries only bite under [`Order::ByMarginalCost`], where a rung stop lets
+/// the order be reconsidered and a rate cap keeps the draw out of a band.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Limit {
+    /// Take as much as it takes to meet the requirement, or empty the holding.
+    #[default]
+    Requirement,
+    /// Stop as soon as the marginal rate would step up, so a dynamic order can
+    /// reconsider which holding is now cheapest.
+    NextRung,
     /// Draw from a holding only while its marginal rate is at or below the cap
     /// (a percent string), then move on. If every holding is capped out and the
     /// requirement is still unmet, the shortfall is drawn anyway and
     /// [`CalcOutput::rate_cap_breached`] is set — delivering the money and
     /// saying so beats silently short-changing the withdrawal.
-    RateCapped { max_rate: String },
+    RateCap(String),
+}
+
+/// How a monthly withdrawal is taken: an [`Order`] paired with a stop [`Limit`].
+///
+/// The two axes are orthogonal — the earlier flat enum sparsely populated the
+/// grid and made "cap the rate but spend in the conventional order" inexpressible.
+/// The five named constructors below are the combinations the UI offers; other
+/// pairings are legal to construct but only [`Order::ByMarginalCost`] consults
+/// the stop (a static order always draws to [`Limit::Requirement`]).
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Strategy {
+    pub order: Order,
+    pub stop: Limit,
 }
 
 impl Strategy {
-    /// Whether this strategy needs to know what a withdrawal costs.
-    fn needs_tax(&self) -> bool {
-        !matches!(self, Strategy::ProRata | Strategy::PreserveGrowth)
+    /// Split pro-rata across every holding, gross. The default.
+    pub fn pro_rata() -> Self {
+        Strategy { order: Order::ProRata, stop: Limit::Requirement }
+    }
+    /// Empty each account kind in turn, in the given order.
+    pub fn ordered(order: Vec<String>) -> Self {
+        Strategy { order: Order::ByKind(order), stop: Limit::Requirement }
+    }
+    /// Take from the cheapest holding each month, re-ranking at every rate rung.
+    pub fn cheapest_first() -> Self {
+        Strategy { order: Order::ByMarginalCost, stop: Limit::NextRung }
+    }
+    /// Drain the lowest-returning holding first.
+    pub fn preserve_growth() -> Self {
+        Strategy { order: Order::ByReturn, stop: Limit::Requirement }
+    }
+    /// Take from the cheapest holding, but never above `max_rate` at the margin.
+    pub fn rate_capped(max_rate: String) -> Self {
+        Strategy { order: Order::ByMarginalCost, stop: Limit::RateCap(max_rate) }
     }
 
-    /// Whether the plan's `withdrawal` is a net figure.
+    /// Whether this strategy needs to know what a withdrawal costs — a tax-
+    /// motivated order, or a stop rule expressed in terms of a tax rate.
+    fn needs_tax(&self) -> bool {
+        matches!(self.order, Order::ByKind(_) | Order::ByMarginalCost)
+            || matches!(self.stop, Limit::NextRung | Limit::RateCap(_))
+    }
+
+    /// Whether the plan's `withdrawal` is a net figure. Only [`Order::ProRata`]
+    /// takes it gross.
     pub fn withdrawal_is_net(&self) -> bool {
-        !matches!(self, Strategy::ProRata)
+        self.order != Order::ProRata
     }
 }
 
@@ -202,9 +248,41 @@ pub struct CalcInput {
     pub horizon_value: String,
     pub horizon_unit: Unit,
     pub plan: Plan,
+    /// Currency symbol for money embedded in error messages, supplied by the
+    /// caller because `calc` names no currency of its own. Blank falls back to a
+    /// neutral marker; when a [`TaxContext`] is present its system's symbol takes
+    /// precedence, so a taxed and an untaxed projection over the same jurisdiction
+    /// never disagree. Display-only — no arithmetic reads it.
+    pub currency: String,
     /// The tax system to price withdrawals against. `None` is an untaxed
     /// projection.
     pub tax: Option<TaxContext>,
+}
+
+/// The currency marker used in money-bearing messages when no symbol is supplied
+/// and no tax system offers one: the generic currency sign, deliberately not any
+/// real money.
+const NEUTRAL_CURRENCY: &str = "\u{00a4}";
+
+impl CalcInput {
+    /// Currency symbol for money embedded in error messages. `calc` names no
+    /// currency, so this is the tax system's symbol when a context is present,
+    /// otherwise the caller-supplied [`currency`](CalcInput::currency), and a
+    /// neutral marker when neither is set. The app derives both from the same
+    /// system, so they agree.
+    fn currency_symbol(&self) -> &str {
+        if let Some(t) = &self.tax {
+            let s = t.system.currency_symbol();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        if self.currency.is_empty() {
+            NEUTRAL_CURRENCY
+        } else {
+            &self.currency
+        }
+    }
 }
 
 /// Which part of an investment row an error belongs to.
@@ -296,7 +374,7 @@ pub struct InvestmentResult {
     pub handover_value: Option<Decimal>,
     pub projected_value: Decimal,
     /// Tax charged on this holding's withdrawals. Always zero without a
-    /// [`TaxContext`], and always zero under [`Strategy::ProRata`].
+    /// [`TaxContext`], and always zero under [`Order::ProRata`].
     pub tax_paid: Decimal,
     /// `withdrawn - tax_paid`: what reached the holder from this holding.
     pub net_withdrawn: Decimal,
@@ -339,7 +417,7 @@ pub struct CalcOutput {
     /// The month the *whole portfolio* first reached £0, as an *absolute* index
     /// into `series`. `None` unless the combined total actually hits zero.
     ///
-    /// Under [`Strategy::ProRata`] every holding empties in the same month, so
+    /// Under [`Order::ProRata`] every holding empties in the same month, so
     /// this is also every row's depletion point; under an ordered strategy the
     /// rows empty in turn and this is the last of them. Either way it is the
     /// portfolio's single depletion point, which is what the goal-seek needs.
@@ -401,7 +479,7 @@ pub struct CalcOutput {
     /// periods out of ten" into the same figure as "two every period", which is
     /// the one distinction the number exists to draw.
     pub accounts_touched_typical: Option<usize>,
-    /// [`Strategy::RateCapped`] only: the cap had to be exceeded to deliver the
+    /// [`Limit::RateCap`] only: the cap had to be exceeded to deliver the
     /// requested income.
     pub rate_cap_breached: bool,
     /// The tax period the figures were computed under (e.g. "2026/27"), and when
@@ -656,6 +734,21 @@ fn static_month(
             continue;
         }
 
+        // When nothing is being taxed (`gross == net`) and the requirement takes
+        // the whole group, zero every member *exactly* rather than by a pro-rata
+        // mul/div that could leave a sub-penny dust behind — the old pro-rata
+        // full-drain special case, generalised to any all-untaxed group so
+        // depletion still reads cleanly. A taxed group cannot use it: `remaining`
+        // is net there and `group_bal` gross, so the two are not comparable.
+        if session.is_none() && remaining >= group_bal {
+            for j in group {
+                delivered += led.balances[*j];
+                led.withdrawn[*j] += led.balances[*j];
+                led.balances[*j] = Decimal::ZERO;
+            }
+            continue;
+        }
+
         let mut allocated = Decimal::ZERO;
         for (k, j) in group.iter().enumerate() {
             let share = if k + 1 == group.len() {
@@ -870,11 +963,11 @@ fn withdrawal_of(withdrawal: &str) -> Result<Decimal, CalcError> {
     Ok(w)
 }
 
-/// The rate cap a [`Strategy::RateCapped`] carries, as a fraction, or `None` for
-/// any other strategy. Its errors point at the strategy control that owns it.
+/// The rate cap a [`Limit::RateCap`] stop carries, as a fraction, or `None` for
+/// any other stop. Its errors point at the strategy control that owns it.
 fn rate_cap_of(strategy: &Strategy) -> Result<Option<Decimal>, CalcError> {
-    match strategy {
-        Strategy::RateCapped { max_rate } => {
+    match &strategy.stop {
+        Limit::RateCap(max_rate) => {
             let r = parse_or_zero(max_rate).ok_or_else(|| {
                 CalcError::new("Enter a valid rate to cap withdrawals at.", Some(Field::Strategy))
             })? / Decimal::from(100u32);
@@ -888,8 +981,8 @@ fn rate_cap_of(strategy: &Strategy) -> Result<Option<Decimal>, CalcError> {
 }
 
 /// The plan parameters a projection runs under, parsed and validated once. The
-/// strategy is owned (cloned) so a deposits plan can carry the [`Strategy::ProRata`]
-/// default without borrowing a local.
+/// strategy is owned (cloned) so a deposits plan can carry the default [`Strategy`]
+/// (pro-rata) without borrowing a local.
 struct PlanParams {
     horizon_months: u32,
     drawdown_months: u32,
@@ -901,7 +994,7 @@ struct PlanParams {
 fn plan_params(input: &CalcInput) -> Result<PlanParams, CalcError> {
     let horizon_months = horizon_months_of(input)?;
     let strategy = match &input.plan {
-        Plan::Deposits => Strategy::ProRata,
+        Plan::Deposits => Strategy::default(),
         Plan::Drawdown { strategy, .. } => strategy.clone(),
     };
     let (drawdown_months, withdrawal) = match &input.plan {
@@ -1036,7 +1129,7 @@ fn open_if_ordered(
     strategy: &Strategy,
     drawing: bool,
 ) -> Result<Option<Box<dyn TaxSession>>, CalcError> {
-    if !(drawing && *strategy != Strategy::ProRata) {
+    if !(drawing && strategy.order != Order::ProRata) {
         return Ok(None);
     }
     match tax {
@@ -1050,13 +1143,16 @@ fn open_if_ordered(
     }
 }
 
-/// The fixed month-by-month draw order a static strategy uses, worked out once.
-/// Empty for pro-rata and the dynamic (greedy) orders, which do not group.
+/// The fixed month-by-month draw order a static order uses, worked out once.
+/// Pro-rata is one group of every holding — the same generic split, no longer a
+/// third mechanism of its own; empty only for the dynamic (greedy) order, which
+/// picks a holding per pass rather than apportioning fixed groups.
 fn groups_for(strategy: &Strategy, prepared: &[Prepared]) -> Vec<Vec<usize>> {
-    match strategy {
-        Strategy::Ordered { order } => groups_by_kind(order, prepared),
-        Strategy::PreserveGrowth => groups_by_return(prepared),
-        _ => Vec::new(),
+    match &strategy.order {
+        Order::ProRata => vec![(0..prepared.len()).collect()],
+        Order::ByKind(order) => groups_by_kind(order, prepared),
+        Order::ByReturn => groups_by_return(prepared),
+        Order::ByMarginalCost => Vec::new(),
     }
 }
 
@@ -1110,7 +1206,9 @@ fn project(
     let horizon = horizon_months as usize;
     let total = (horizon_months + drawdown_months) as usize;
     let drawing = drawdown_months > 0;
-    let ordered = drawing && *strategy != Strategy::ProRata;
+    // Pro-rata takes its withdrawal gross and opens no session; `ordered` gates
+    // the tax-period bookkeeping that only the net orders have.
+    let ordered = drawing && strategy.order != Order::ProRata;
 
     // Per-holding running balance and cumulative cash flow.
     let mut balances: Vec<Decimal> = prepared.iter().map(|p| p.current_value).collect();
@@ -1205,10 +1303,13 @@ fn project(
                 contributed[j] = contributed[j].checked_add(c).ok_or_else(|| dep_too_large(j))?;
                 contributed_total = contributed_total.checked_add(c).ok_or_else(|| dep_too_large(j))?;
             }
-        } else if ordered {
-            // An ordered drawdown. `withdrawal` is the NET the holder wants in
-            // their pocket, so the amount leaving the investments is whatever it
-            // takes to deliver that after tax.
+        } else {
+            // A drawdown month. Every order — pro-rata included — runs through the
+            // one generic split or the one greedy pass; there is no third
+            // mechanism. For a net order `withdrawal` is the net the holder wants
+            // in pocket, so the gross leaving the investments is whatever delivers
+            // it after tax. `ordered` gates the tax-period bookkeeping, meaningless
+            // for pro-rata (no session, gross == net).
             //
             // Tax periods are anchored to the *handover*, not to a real calendar
             // date and not to month zero. A real date would make the projection
@@ -1238,13 +1339,16 @@ fn project(
                 withdrawn: &mut withdrawn,
                 taxes: &mut taxes,
             };
-            match strategy {
-                Strategy::Ordered { .. } | Strategy::PreserveGrowth => {
-                    static_month(session, &mut led, groups, withdrawal)?;
-                }
-                _ => {
+            match &strategy.order {
+                // Dynamic: a greedy argmax, re-ranked at every rate boundary.
+                Order::ByMarginalCost => {
                     let (_, breached) = greedy_month(session, &mut led, withdrawal, rate_cap, &mut blocked)?;
                     rate_cap_breached |= breached;
+                }
+                // Static: a fixed apportionment across `groups` — pro-rata being
+                // one group of every holding.
+                _ => {
+                    static_month(session, &mut led, groups, withdrawal)?;
                 }
             }
 
@@ -1255,51 +1359,15 @@ fn project(
                     withdrawn_total = withdrawn_total
                         .checked_add(took)
                         .ok_or_else(overflowed)?;
-                    let id = prepared[j].kind_id.as_str();
-                    if !period_kinds.contains(&id) {
-                        period_kinds.push(id);
+                    if ordered {
+                        let id = prepared[j].kind_id.as_str();
+                        if !period_kinds.contains(&id) {
+                            period_kinds.push(id);
+                        }
                     }
                 }
             }
             tax_total = taxes.iter().sum();
-        } else {
-            // Drawdown: take the portfolio withdrawal, apportioned across the
-            // holdings pro-rata by their current balance. Capped at the whole
-            // pot — an empty portfolio yields nothing further.
-            let mut total_bal = Decimal::ZERO;
-            for j in 0..n {
-                total_bal = total_bal.checked_add(balances[j]).ok_or_else(overflowed)?;
-            }
-            if !total_bal.is_zero() {
-                let drawn = withdrawal.min(total_bal).max(Decimal::ZERO);
-                if drawn == total_bal {
-                    // Draws the lot: zero every balance *exactly* rather than by
-                    // subtraction, so no sub-penny residue lingers and depletion
-                    // reads cleanly.
-                    for j in 0..n {
-                        withdrawn[j] = withdrawn[j].checked_add(balances[j]).ok_or_else(overflowed)?;
-                        balances[j] = Decimal::ZERO;
-                    }
-                } else {
-                    // Pro-rata shares. The last holding absorbs the rounding
-                    // residue so the shares sum to `drawn` by construction — this
-                    // is what keeps `Σ per-row withdrawn == withdrawn_total` exact.
-                    let mut allocated = Decimal::ZERO;
-                    for j in 0..n - 1 {
-                        let share = drawn
-                            .checked_mul(balances[j])
-                            .and_then(|x| x.checked_div(total_bal))
-                            .ok_or_else(overflowed)?;
-                        balances[j] -= share;
-                        withdrawn[j] += share;
-                        allocated += share;
-                    }
-                    let last = drawn - allocated;
-                    balances[n - 1] -= last;
-                    withdrawn[n - 1] += last;
-                }
-                withdrawn_total = withdrawn_total.checked_add(drawn).ok_or_else(overflowed)?;
-            }
         }
     }
 
@@ -1614,6 +1682,7 @@ fn long_deposits(input: &CalcInput) -> CalcInput {
         horizon_value: MAX_HORIZON_MONTHS.to_string(),
         horizon_unit: Unit::Months,
         plan: Plan::Deposits,
+        currency: input.currency.clone(),
         tax: input.tax.clone(),
     }
 }
@@ -1641,7 +1710,7 @@ fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> 
             p.contribution = each;
         }
         let mut session: Option<Box<dyn TaxSession>> = None;
-        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::ProRata, &[], None, &mut session)?;
+        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::pro_rata(), &[], None, &mut session)?;
         Ok(round2(*run.totals.last().expect("horizon >= 1 guarantees a point")))
     };
 
@@ -1657,7 +1726,7 @@ fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> 
             return Err(CalcError::new(
                 format!(
                     "No monthly top-up reaches {} in this time; extend the horizon or lower the target.",
-                    fmt_money_plain(target)
+                    fmt_money_plain(target, input.currency_symbol())
                 ),
                 None,
             ));
@@ -1698,7 +1767,7 @@ fn solve_time(input: &CalcInput, target: &str) -> Result<Solution, CalcError> {
         None => Err(CalcError::new(
             format!(
                 "The portfolio does not reach {} within 100 years; raise the returns or the contributions.",
-                fmt_money_plain(target)
+                fmt_money_plain(target, input.currency_symbol())
             ),
             None,
         )),
@@ -1756,7 +1825,7 @@ fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
             return Err(CalcError::new(
                 format!(
                     "The portfolio can sustain more than {} a month, which is beyond the range this solver reports.",
-                    fmt_money_plain(cap)
+                    fmt_money_plain(cap, input.currency_symbol())
                 ),
                 None,
             ));
@@ -1842,10 +1911,12 @@ fn solve_time_to_deplete(input: &CalcInput) -> Result<Solution, CalcError> {
     })
 }
 
-/// A grouped `£1,234.56` for embedding in error messages, matching the UI's
-/// `fmt_money`. Kept here (not in the UI `format` module) because `calc` owns
-/// its own message text.
-fn fmt_money_plain(d: Decimal) -> String {
+/// A grouped `1,234.56` behind the caller's currency `symbol`, for embedding in
+/// error messages, matching the UI's `fmt_money`. Kept here (not in the UI
+/// `format` module) because `calc` owns its own message text; the symbol is
+/// passed in rather than written because `calc` names no currency (see
+/// `CalcInput::currency`).
+fn fmt_money_plain(d: Decimal, symbol: &str) -> String {
     let s = format!("{:.2}", d.round_dp(2).abs());
     let (int, frac) = s.split_once('.').unwrap_or((s.as_str(), "00"));
     let len = int.len();
@@ -1857,7 +1928,7 @@ fn fmt_money_plain(d: Decimal) -> String {
         grouped.push(ch);
     }
     let sign = if d.is_sign_negative() { "-" } else { "" };
-    format!("{sign}\u{00a3}{grouped}.{frac}")
+    format!("{sign}{symbol}{grouped}.{frac}")
 }
 
 /// Convert a `value` + `unit` into whole months, doing the ×12 and the rounding
@@ -1960,6 +2031,7 @@ mod tests {
             horizon_value: horizon.into(),
             horizon_unit: hunit,
             plan: Plan::Deposits,
+            currency: String::new(),
             tax: None,
         }
     }
@@ -1990,8 +2062,9 @@ mod tests {
                 drawdown_value: draw.into(),
                 drawdown_unit: dunit,
                 withdrawal: withdrawal.into(),
-                strategy: Strategy::ProRata,
+                strategy: Strategy::pro_rata(),
             },
+            currency: String::new(),
             tax: None,
         }
     }
@@ -2028,6 +2101,7 @@ mod tests {
                 withdrawal: withdrawal.into(),
                 strategy,
             },
+            currency: String::new(),
             tax,
         }
     }
@@ -2153,6 +2227,7 @@ mod tests {
                 horizon_value: "10".into(),
                 horizon_unit: Unit::Years,
                 plan: Plan::Deposits,
+                currency: String::new(),
                 tax: None,
             }),
             None
@@ -2600,11 +2675,11 @@ mod tests {
     /// under all of them.
     fn every_strategy() -> Vec<(&'static str, Strategy)> {
         vec![
-            ("pro-rata", Strategy::ProRata),
-            ("ordered", Strategy::Ordered { order: vec![GAINS.into(), FREE.into(), INCOME.into()] }),
-            ("cheapest first", Strategy::CheapestFirst),
-            ("preserve growth", Strategy::PreserveGrowth),
-            ("rate capped", Strategy::RateCapped { max_rate: "20".into() }),
+            ("pro-rata", Strategy::pro_rata()),
+            ("ordered", Strategy::ordered(vec![GAINS.into(), FREE.into(), INCOME.into()])),
+            ("cheapest first", Strategy::cheapest_first()),
+            ("preserve growth", Strategy::preserve_growth()),
+            ("rate capped", Strategy::rate_capped("20".into())),
         ]
     }
 
@@ -2622,13 +2697,13 @@ mod tests {
         // does but splits pro-rata, must project *identically*. Pro-rata never
         // opens a session, which is what makes this structural rather than a
         // promise -- the tax-aware code is a separate path it never enters.
-        let untaxed = strategy_run(mixed_portfolio(), "12", "60", "2000", Strategy::ProRata, None);
+        let untaxed = strategy_run(mixed_portfolio(), "12", "60", "2000", Strategy::pro_rata(), None);
         let taxed_input = strategy_run(
             mixed_portfolio(),
             "12",
             "60",
             "2000",
-            Strategy::ProRata,
+            Strategy::pro_rata(),
             Some(taxed("30000", "60")),
         );
         assert_eq!(
@@ -2726,7 +2801,7 @@ mod tests {
     #[test]
     fn the_requested_net_is_delivered_in_full_while_the_pot_lasts() {
         for (name, strategy) in every_strategy() {
-            if matches!(strategy, Strategy::ProRata) {
+            if matches!(strategy.order, Order::ProRata) {
                 continue; // pro-rata's withdrawal is gross, not net
             }
             let input = strategy_run(
@@ -2757,7 +2832,7 @@ mod tests {
             "1",
             "24",
             "1000",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -2778,7 +2853,7 @@ mod tests {
             "1",
             "12",
             "2000",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -2813,8 +2888,8 @@ mod tests {
             ))
             .unwrap()
         };
-        let greedy = run(Strategy::CheapestFirst);
-        let fixed = run(Strategy::Ordered { order: vec![FREE.into(), INCOME.into()] });
+        let greedy = run(Strategy::cheapest_first());
+        let fixed = run(Strategy::ordered(vec![FREE.into(), INCOME.into()]));
         assert!(
             greedy.tax_paid_total < fixed.tax_paid_total,
             "the greedy should claim allowances the fixed order wastes: {} vs {}",
@@ -2834,7 +2909,7 @@ mod tests {
             "1",
             "120",
             "2000",
-            Strategy::Ordered { order: vec![GAINS.into(), FREE.into(), INCOME.into()] },
+            Strategy::ordered(vec![GAINS.into(), FREE.into(), INCOME.into()]),
             Some(taxed("0", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -2861,7 +2936,7 @@ mod tests {
             "1",
             "60",
             "1000",
-            Strategy::Ordered { order: vec![GAINS.into()] },
+            Strategy::ordered(vec![GAINS.into()]),
             Some(taxed("0", "60")),
         );
         let out = calculate(&input).expect("a partial order must still project");
@@ -2877,7 +2952,7 @@ mod tests {
             "1",
             "24",
             "500",
-            Strategy::PreserveGrowth,
+            Strategy::preserve_growth(),
             None,
         );
         let out = calculate(&input).expect("PreserveGrowth must be legal untaxed");
@@ -2896,12 +2971,12 @@ mod tests {
             "1",
             "120",
             "100",
-            Strategy::PreserveGrowth,
+            Strategy::preserve_growth(),
             None,
         ))
         .unwrap();
         let pro_rata =
-            calculate(&strategy_run(portfolio, "1", "120", "100", Strategy::ProRata, None)).unwrap();
+            calculate(&strategy_run(portfolio, "1", "120", "100", Strategy::pro_rata(), None)).unwrap();
         assert!(
             preserve.projected_total > pro_rata.projected_total,
             "preserving the compounder should end richer: {} vs {}",
@@ -2917,7 +2992,7 @@ mod tests {
             "1",
             "240",
             "150",
-            Strategy::PreserveGrowth,
+            Strategy::preserve_growth(),
             None,
         );
         let out = calculate(&input).unwrap();
@@ -2939,7 +3014,7 @@ mod tests {
             "1",
             "24",
             "1000",
-            Strategy::RateCapped { max_rate: "0" .into() },
+            Strategy::rate_capped("0".into()),
             Some(taxed("50000", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -2957,7 +3032,7 @@ mod tests {
             "1",
             "24",
             "1000",
-            Strategy::RateCapped { max_rate: "0".into() },
+            Strategy::rate_capped("0".into()),
             Some(taxed("50000", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -2973,7 +3048,7 @@ mod tests {
     #[test]
     fn a_tax_aware_order_without_tax_details_is_refused_at_the_control() {
         let input =
-            strategy_run(mixed_portfolio(), "1", "24", "1000", Strategy::CheapestFirst, None);
+            strategy_run(mixed_portfolio(), "1", "24", "1000", Strategy::cheapest_first(), None);
         let err = calculate(&input).unwrap_err();
         assert_eq!(err.field, Some(Field::Strategy), "the message must name a control");
     }
@@ -2985,7 +3060,7 @@ mod tests {
             "1",
             "24",
             "10",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         let err = calculate(&input).unwrap_err();
@@ -3002,7 +3077,7 @@ mod tests {
             "1",
             "24",
             "10",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         assert_eq!(
@@ -3017,7 +3092,7 @@ mod tests {
             "1",
             "24",
             "10",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         assert!(calculate(&ignored).is_ok(), "an unused field must not block the projection");
@@ -3030,7 +3105,7 @@ mod tests {
             "1",
             "24",
             "1000",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "40")),
         );
         let err = calculate(&input).unwrap_err();
@@ -3047,7 +3122,7 @@ mod tests {
             "1",
             "600",
             "3000",
-            Strategy::Ordered { order: vec![GAINS.into(), FREE.into(), INCOME.into()] },
+            Strategy::ordered(vec![GAINS.into(), FREE.into(), INCOME.into()]),
             Some(taxed("0", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -3077,7 +3152,7 @@ mod tests {
             "12",
             "24",
             "500",
-            Strategy::ProRata,
+            Strategy::pro_rata(),
             None,
         );
         let out = calculate(&input).unwrap();
@@ -3105,7 +3180,7 @@ let row = out.investments[0]
             "1",
             "12",
             "2000",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         assert_eq!(calculate(&blank).unwrap().tax_paid_total, Decimal::ZERO);
@@ -3115,7 +3190,7 @@ let row = out.investments[0]
             "1",
             "12",
             "2000",
-            Strategy::CheapestFirst,
+            Strategy::cheapest_first(),
             Some(taxed("0", "60")),
         );
         assert!(
@@ -3133,7 +3208,7 @@ let row = out.investments[0]
             "1",
             "12",
             "500",
-            Strategy::Ordered { order: vec![GAINS.into(), FREE.into(), INCOME.into()] },
+            Strategy::ordered(vec![GAINS.into(), FREE.into(), INCOME.into()]),
             Some(taxed("0", "60")),
         );
         let out = calculate(&input).unwrap();
@@ -3181,6 +3256,23 @@ let row = out.investments[0]
         let err = solve(&input, &Goal::MonthlyTopUp { target: "999999999999".into() }).unwrap_err();
         assert!(err.message.contains("No monthly top-up reaches"));
         assert!(err.field.is_none());
+    }
+
+    #[test]
+    fn money_in_messages_uses_the_supplied_currency_symbol() {
+        // `calc` names no currency: with none supplied the message carries the
+        // neutral marker, and the caller's symbol is used verbatim when given.
+        let mut input = with_contribution("1", "0", "0", "1", Unit::Months);
+        let goal = Goal::MonthlyTopUp { target: "999999999999".into() };
+
+        let neutral = solve(&input, &goal).unwrap_err();
+        assert!(neutral.message.contains(NEUTRAL_CURRENCY));
+        assert!(!neutral.message.contains('\u{00a3}'));
+
+        input.currency = "\u{00a3}".into();
+        let pounds = solve(&input, &goal).unwrap_err();
+        assert!(pounds.message.contains('\u{00a3}'));
+        assert!(!pounds.message.contains(NEUTRAL_CURRENCY));
     }
 
     #[test]

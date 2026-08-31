@@ -20,10 +20,10 @@
 //! dim the projection panels. It renders its own outcome and leaves the rest of
 //! the page alone.
 
-use calc::{calculate, CalcInput, CalcOutput, Plan, Strategy};
+use calc::{calculate, CalcInput, CalcOutput, Limit, Order, Plan, Strategy};
 use leptos::*;
 
-use crate::convert::TAX_SYSTEM;
+use crate::convert::{StrategyChoice, TAX_SYSTEM};
 use crate::format::{fmt_money, month_label};
 
 /// One strategy's outcome, reduced to the figures the table shows.
@@ -67,23 +67,33 @@ impl Comparison {
     }
 }
 
-/// The strategies offered, in a fixed presentation order.
+/// The strategies the comparison shows, in the catalogue's presentation order.
 ///
-/// Labels are descriptive, never evaluative. The ordered one composes its label
-/// from the account names in the order itself, so even that string is generated
-/// from the tax system rather than written here.
-pub fn candidates() -> Vec<(String, Strategy)> {
-    let conventional: Vec<String> = TAX_SYSTEM
-        .conventional_order()
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-    vec![
-        ("Split across everything".to_string(), Strategy::ProRata),
-        (conventional_label(&conventional), Strategy::Ordered { order: conventional }),
-        ("Lowest tax this month".to_string(), Strategy::CheapestFirst),
-        ("Longest-lasting pot".to_string(), Strategy::PreserveGrowth),
-    ]
+/// The catalogue ([`StrategyChoice`]) is the single source of which strategies
+/// exist; this is the [`in_comparison`](StrategyChoice::in_comparison) subset,
+/// so adding one to the catalogue lands it here automatically (or is explicitly
+/// withheld). Each row's label is derived from the built [`Strategy`] by
+/// [`strategy_label`], never written alongside it.
+pub fn candidates() -> Vec<Strategy> {
+    StrategyChoice::ALL
+        .into_iter()
+        .filter(|c| c.in_comparison())
+        .map(|c| c.build(""))
+        .collect()
+}
+
+/// The comparison row's heading, generated from the strategy so it stays in step
+/// with the behaviour. Descriptive, never evaluative — for the same reason the
+/// figures are ranked by nothing. Keyed off both axes like [`strategy_hint`], so
+/// the two `ByMarginalCost` strategies stay distinct.
+fn strategy_label(strategy: &Strategy) -> String {
+    match (&strategy.order, &strategy.stop) {
+        (Order::ProRata, _) => "Split across everything".to_string(),
+        (Order::ByKind(ids), _) => conventional_label(ids),
+        (Order::ByReturn, _) => "Longest-lasting pot".to_string(),
+        (Order::ByMarginalCost, Limit::RateCap(_)) => "Staying under a tax rate".to_string(),
+        (Order::ByMarginalCost, _) => "Lowest tax this month".to_string(),
+    }
 }
 
 /// "Spend Cash, then Gains, then Income" — built from whatever the tax system's
@@ -109,21 +119,23 @@ fn conventional_label(order: &[String]) -> String {
 /// behaviour, and descriptive rather than evaluative for the same reason the
 /// labels are — no strategy is called good or bad here.
 fn strategy_hint(strategy: &Strategy) -> String {
-    match strategy {
-        Strategy::ProRata => "Take a slice from every holding at once, in proportion to \
+    // Keyed off both axes: the two `ByMarginalCost` strategies read the same
+    // order but tell apart by their stop (a rung step vs a rate cap).
+    match (&strategy.order, &strategy.stop) {
+        (Order::ProRata, _) => "Take a slice from every holding at once, in proportion to \
              its size. This is the app's default, and the amount is taken before tax."
             .to_string(),
-        Strategy::Ordered { .. } => "Empty each kind of account in turn, in the order an \
+        (Order::ByKind(_), _) => "Empty each kind of account in turn, in the order an \
              adviser conventionally suggests \u{2014} the simpler, lower-tax pots first."
             .to_string(),
-        Strategy::CheapestFirst => "Each month, draw from whichever account is taxed least \
-             on the next pound. It minimises this month's tax, not your lifetime tax."
-            .to_string(),
-        Strategy::PreserveGrowth => "Drain your lowest-returning holding first, leaving the \
+        (Order::ByReturn, _) => "Drain your lowest-returning holding first, leaving the \
              best compounder untouched for as long as possible. Needs no tax details."
             .to_string(),
-        Strategy::RateCapped { .. } => "Draw from each account only while its tax rate stays \
-             at or below the cap, then move on to the next."
+        (Order::ByMarginalCost, Limit::RateCap(_)) => "Draw from each account only while its tax \
+             rate stays at or below the cap, then move on to the next."
+            .to_string(),
+        (Order::ByMarginalCost, _) => "Each month, draw from whichever account is taxed least \
+             on the next pound. It minimises this month's tax, not your lifetime tax."
             .to_string(),
     }
 }
@@ -140,7 +152,8 @@ pub fn compare(input: &CalcInput) -> Vec<Comparison> {
 
     candidates()
         .into_iter()
-        .map(|(label, strategy)| {
+        .map(|strategy| {
+            let label = strategy_label(&strategy);
             let mut probe = input.clone();
             if let Plan::Drawdown { strategy: s, .. } = &mut probe.plan {
                 *s = strategy.clone();
@@ -309,14 +322,15 @@ mod tests {
                 withdrawal: "1000".into(),
                 strategy,
             },
+            currency: String::new(),
             tax: None,
         }
     }
 
     #[test]
     fn every_candidate_produces_a_row_in_a_fixed_order() {
-        let first = compare(&drawdown_input(Strategy::ProRata));
-        let second = compare(&drawdown_input(Strategy::CheapestFirst));
+        let first = compare(&drawdown_input(Strategy::pro_rata()));
+        let second = compare(&drawdown_input(Strategy::cheapest_first()));
         assert_eq!(first.len(), candidates().len());
         let labels: Vec<&str> = first.iter().map(|r| r.label.as_str()).collect();
         let again: Vec<&str> = second.iter().map(|r| r.label.as_str()).collect();
@@ -330,7 +344,7 @@ mod tests {
     fn a_strategy_that_cannot_run_reports_instead_of_failing_the_comparison() {
         // No tax details, so the tax-aware orders cannot run. They must come back
         // as rows carrying a reason, not blow up the whole table.
-        let rows = compare(&drawdown_input(Strategy::ProRata));
+        let rows = compare(&drawdown_input(Strategy::pro_rata()));
         assert_eq!(rows.len(), candidates().len(), "every candidate still gets a row");
         assert!(
             rows.iter().any(|r| r.problem.is_some()),
@@ -343,7 +357,7 @@ mod tests {
         // Its withdrawal is gross where every other row's is net, so printing
         // "£0.00 tax" and a gross total under "kept" would read as the best row
         // to anyone skimming the columns.
-        let rows = compare(&drawdown_input(Strategy::ProRata));
+        let rows = compare(&drawdown_input(Strategy::pro_rata()));
         let pro_rata = rows.first().expect("pro-rata is the first candidate");
         assert!(pro_rata.problem.is_some(), "and it says why");
         assert_eq!(pro_rata.tax, "\u{2014}");
@@ -355,7 +369,7 @@ mod tests {
 
     #[test]
     fn deposits_mode_has_nothing_to_compare() {
-        let mut input = drawdown_input(Strategy::ProRata);
+        let mut input = drawdown_input(Strategy::pro_rata());
         input.plan = Plan::Deposits;
         assert!(compare(&input).is_empty());
     }
