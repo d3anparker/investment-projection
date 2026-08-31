@@ -693,6 +693,11 @@ fn draw_one(
         // original cost away with it, so what remains keeps its profit ratio.
         // That also makes the taxable fraction path-independent, which is what
         // keeps the goal-seek's feasibility search well behaved.
+        //
+        // This rescales the *absolute* remaining basis and is deliberately not
+        // `Pot::proportional_leak`, which returns the taxable *fraction*
+        // (1 - basis/available). They share a term but are different quantities;
+        // don't fold one into the other.
         let left = (available - drawn.gross).max(Decimal::ZERO);
         led.basis[j] = led.basis[j]
             .checked_mul(left)
