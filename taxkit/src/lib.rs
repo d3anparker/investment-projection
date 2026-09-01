@@ -223,10 +223,11 @@ pub enum StopAt {
 
 /// Everything a tax system needs in order to open a session.
 ///
-/// `Default`-derived and deliberately **not** `#[non_exhaustive]`: new fields
-/// are added here as tax systems need them, and every construction site spreads
-/// `..Default::default()` so a new field is one line at the definition rather
-/// than a break at each caller. A system ignores any field it does not use.
+/// `Default`-derived so a test can name only the fields it cares about, and
+/// deliberately **not** `#[non_exhaustive]`. The production caller in `calc`
+/// still names every field: with one such caller, the compile error a new field
+/// causes there is the only thing that would catch the field being collected by
+/// the UI and then silently defaulted on the way to the tax system.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionSpec {
     /// An id from [`TaxSystem::regions`].
@@ -244,6 +245,21 @@ pub struct SessionSpec {
     /// reads none, so this stays empty for every jurisdiction that has not asked
     /// for a bespoke control.
     pub options: Vec<(String, String)>,
+}
+
+impl SessionSpec {
+    /// The value of option `id`, if the UI supplied one.
+    ///
+    /// Lives here rather than in each implementation crate because the lookup is
+    /// a property of the channel, not of any jurisdiction — otherwise every
+    /// system that uses an option re-spells the same `find`, each with its own
+    /// idea of trimming and matching.
+    pub fn option(&self, id: &str) -> Option<&str> {
+        self.options
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// Whether a tax system's figures still look current.
@@ -470,6 +486,11 @@ pub trait TaxSession {
     /// times, and allocating a fresh `Vec` here would be one per year per run.
     /// Only reached when [`TaxSystem::has_periodic_charge`] is set; the default
     /// zeroes the buffer, which is why a withdrawal-only system pays nothing.
+    ///
+    /// Because the caller reuses that buffer across periods, an implementation
+    /// **must write every slot**, zero included. Writing only the slots it
+    /// charges leaves last period's figures in the rest, and they are levied
+    /// again — silently, as a plausible-looking number.
     ///
     /// [`draw`]: Self::draw
     fn period_charge(

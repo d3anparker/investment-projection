@@ -834,6 +834,24 @@ async fn the_german_settings_panel_mounts_only_under_germany() {
     );
 }
 
+#[wasm_bindgen_test]
+async fn a_charging_system_keeps_its_tax_details_under_pro_rata() {
+    // The UK withholds the tax context from pro-rata because pro-rata genuinely
+    // ignores tax. Germany also charges for *holding*, and that charge lands
+    // whatever order the money comes out in — so the context is kept, the figures
+    // name the year they were charged under, and the details the charge depends
+    // on stay askable rather than becoming hidden inputs.
+    let root = harness::mount_with(&de_state(vec![row("Depot", "300000", "5", "0")], ""));
+    assert!(
+        harness::q_opt(&root, ".tax-asof").is_some(),
+        "a charged projection must name the rules it charged under"
+    );
+    assert!(
+        harness::q_opt(&root, "#other-income").is_some(),
+        "and a control the charge depends on cannot be hidden"
+    );
+}
+
 // =====================================================================
 // Harness
 // =====================================================================

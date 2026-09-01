@@ -15,7 +15,7 @@ use taxkit::{
     TaxError, TaxErrorKind, TaxSession, TaxSystem,
 };
 
-use crate::tables::{self, de_tax_year_of, tax_year_label, TaxYear, Treatment, WithdrawalTax};
+use crate::tables::{self, bp, de_tax_year_of, tax_year_label, TaxYear, Treatment, WithdrawalTax};
 use crate::tarif::Tarif;
 
 /// Months after `as_of` beyond which the figures are called stale even if the
@@ -51,8 +51,17 @@ pub mod options {
 fn eur(v: i64) -> Decimal {
     Decimal::from(v)
 }
-fn bp(b: u32) -> Decimal {
-    Decimal::new(i64::from(b), 4)
+
+/// The effective flat capital rate, §32d(1): 0.25 grossed up for Soli and church
+/// tax, church tax being deductible against its own base.
+///
+/// A function of the rules and the church-tax setting only, so a session works it
+/// out once at `open` rather than on every schedule build.
+fn flat_rate(rules: &TaxYear, kirche_bp: u32) -> Decimal {
+    let k = bp(kirche_bp);
+    let kapest = bp(rules.kapest_bp);
+    let soli = bp(rules.soli_bp);
+    kapest * (Decimal::ONE + soli + k) / (Decimal::ONE + kapest * k)
 }
 
 /// Germany.
@@ -63,10 +72,15 @@ pub struct GermanTaxSystem;
 pub static DE: GermanTaxSystem = GermanTaxSystem;
 
 impl GermanTaxSystem {
+    /// The Kirchensteuer rate a region id selects, read from the tables rather
+    /// than written out here: the rates are data, and a rate update is only
+    /// allowed to touch `tables.rs`. Spelling them here too would mean an update
+    /// that edits the table and changes nothing.
     fn kirche_bp(region: &str) -> u32 {
+        let rates = tables::LATEST.kirchensteuer_bp;
         match region {
-            "de_ks8" => 800,
-            "de_ks9" => 900,
+            "de_ks8" => rates[0],
+            "de_ks9" => rates[1],
             _ => 0,
         }
     }
@@ -141,9 +155,8 @@ impl TaxSystem for GermanTaxSystem {
             ));
         }
 
-        let opt = |id: &str| spec.options.iter().find(|(k, _)| k == id).map(|(_, v)| v.as_str());
-        let splitting = opt(options::FILING) == Some(options::FILING_JOINT);
-        let start_year = opt(options::BASE_YEAR)
+        let splitting = spec.option(options::FILING) == Some(options::FILING_JOINT);
+        let start_year = spec.option(options::BASE_YEAR)
             .and_then(|v| v.trim().parse::<u16>().ok())
             .unwrap_or_else(|| de_tax_year_of(tables::LATEST.starts));
 
@@ -154,6 +167,7 @@ impl TaxSystem for GermanTaxSystem {
         Ok(Box::new(GermanSession {
             rules,
             kirche_bp,
+            flat_rate: flat_rate(rules, kirche_bp),
             splitting,
             start_year,
             uprate: spec.uprate,
@@ -172,6 +186,10 @@ impl TaxSystem for GermanTaxSystem {
 struct GermanSession {
     rules: &'static TaxYear,
     kirche_bp: u32,
+    /// The effective flat capital rate, fixed for the session by the rules and
+    /// the church-tax setting. Cached because it is read on every capital
+    /// schedule build: per holding, per greedy pass, per month.
+    flat_rate: Decimal,
     splitting: bool,
     /// Year the drawdown starts, fixing the cohort Besteuerungsanteil for life.
     start_year: u16,
@@ -208,19 +226,10 @@ impl GermanSession {
         }
     }
 
-    /// The effective flat capital rate, §32d(1): 0.25 grossed for Soli and church
-    /// tax, church tax deductible against its own base.
-    fn flat_rate(&self) -> Decimal {
-        let k = bp(self.kirche_bp);
-        let kapest = bp(self.rules.kapest_bp);
-        let soli = bp(self.rules.soli_bp);
-        kapest * (Decimal::ONE + soli + k) / (Decimal::ONE + kapest * k)
-    }
-
     /// Günstigerprüfung, simplified to a monotone lesser-of: capital is charged
     /// at the flat rate or the personal marginal rate, whichever is lower.
     fn capital_rate(&self) -> Decimal {
-        self.flat_rate().min(self.tarif.marginal_rate_at(self.income))
+        self.flat_rate.min(self.tarif.marginal_rate_at(self.income))
     }
 
     fn sparer_remaining(&self) -> Decimal {
@@ -249,14 +258,22 @@ impl GermanSession {
         Ok(())
     }
 
+    /// The withdrawal treatment for a holding's account kind.
+    ///
+    /// Looked up in the treatment table alone on the happy path. The catalogue is
+    /// only consulted when that misses, and then only to say *which* kind of
+    /// wrong it is: an id nobody advertises, versus an advertised one the tables
+    /// forgot. That distinction is worth a scan on an error path; it is not worth
+    /// one per holding per draw on the month loop, which is what checking both up
+    /// front cost.
     fn resolve(&self, pot: &Pot) -> Result<Treatment, TaxError> {
-        DE.account_kind(pot.kind).ok_or_else(|| {
-            TaxError::new(
-                TaxErrorKind::UnknownAccount,
-                format!("'{}' is not an account this calculator knows.", pot.kind),
-            )
-        })?;
         let t = tables::treatment_of(pot.kind).ok_or_else(|| {
+            if DE.account_kind(pot.kind).is_none() {
+                return TaxError::new(
+                    TaxErrorKind::UnknownAccount,
+                    format!("'{}' is not an account this calculator knows.", pot.kind),
+                );
+            }
             TaxError::new(
                 TaxErrorKind::BadRules,
                 format!("'{}' has no withdrawal treatment in the tax tables.", pot.kind),
@@ -337,6 +354,19 @@ impl TaxSession for GermanSession {
         }
     }
 
+    /// Both figures off a single `schedule_for`, the same reason `uk-tax`
+    /// overrides this: building a schedule means scanning the treatment table
+    /// and, for capital income, constructing a `Ladder`, and a cheapest-first
+    /// ranking asks for the keep *and* the headroom of every holding on every
+    /// greedy pass. Taking the default would do that work twice per query.
+    fn marginal(&self, pot: &Pot) -> (Decimal, Option<Decimal>) {
+        match self.schedule_for(pot) {
+            Ok(Sched::Ladder(l)) => (l.marginal_keep(), l.marginal_headroom()),
+            Ok(Sched::Tarif { leak }) => (self.tarif.marginal_keep(self.income, leak), None),
+            Err(_) => (Decimal::ZERO, None),
+        }
+    }
+
     fn draw(&mut self, pot: &Pot, net_wanted: Decimal, stop: StopAt) -> Result<Draw, TaxError> {
         match self.schedule_for(pot)? {
             Sched::Ladder(l) => {
@@ -361,7 +391,7 @@ impl TaxSession for GermanSession {
     ) -> Result<(), TaxError> {
         let basiszins = bp(self.rules.basiszins_bp);
         let faktor = bp(self.rules.vorab_faktor_bp);
-        let rate = self.flat_rate();
+        let rate = self.flat_rate;
         for (idx, p) in pots.iter().enumerate() {
             charges[idx] = Decimal::ZERO;
             let Some(t) = tables::treatment_of(p.pot.kind) else { continue };

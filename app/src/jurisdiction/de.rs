@@ -44,7 +44,7 @@ pub fn settings(slot: SettingsSlot) -> View {
     view! {
         <div class="system-options">
             <label class="fld">
-                <span class="fld-label">{de_opts::FILING_LABEL}</span>
+                <span class="fld-lbl">{de_opts::FILING_LABEL}</span>
                 <select on:change=move |ev| set(options, de_opts::FILING, &ev)>
                     <option
                         value=de_opts::FILING_INDIVIDUAL
@@ -61,7 +61,7 @@ pub fn settings(slot: SettingsSlot) -> View {
                 </select>
             </label>
             <label class="fld">
-                <span class="fld-label">{de_opts::BASE_YEAR_LABEL}</span>
+                <span class="fld-lbl">{de_opts::BASE_YEAR_LABEL}</span>
                 <input
                     type="number"
                     inputmode="numeric"

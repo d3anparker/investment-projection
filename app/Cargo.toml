@@ -8,7 +8,7 @@ description = "Leptos (Rust/WASM) front end for the investment projection core"
 leptos = { version = "0.6", features = ["csr"] }
 calc = { path = "../calc" }
 taxkit = { path = "../taxkit" }
-# The one line that names a jurisdiction; see `convert::TAX_SYSTEM`.
+# The jurisdiction crates. `app` may name them only inside `src/jurisdiction/`.
 uk-tax = { path = "../uk-tax" }
 de-tax = { path = "../de-tax" }
 rust_decimal = { version = "1", features = ["maths"] }

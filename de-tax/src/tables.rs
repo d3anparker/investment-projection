@@ -13,6 +13,7 @@
 //! its taxation matches an existing [`WithdrawalTax`]; a genuinely new mechanism
 //! is an [`super::engine`]/[`super::tarif`] change and a decision.
 
+use rust_decimal::Decimal;
 use taxkit::{AccountKind, SimpleDate};
 
 // --- the shape of a year ----------------------------------------------------
@@ -99,6 +100,14 @@ pub const fn de_tax_year_of(d: SimpleDate) -> u16 {
 /// "2026" for 2026. Allocates, so it is not `const`.
 pub fn tax_year_label(year: u16) -> String {
     year.to_string()
+}
+
+/// Basis points as a fraction: `2500` is `0.25`.
+///
+/// Lives beside the data it decodes, because every rate in this file is stored
+/// in basis points and both `engine` and `tarif` have to read them.
+pub(crate) fn bp(b: u32) -> Decimal {
+    Decimal::new(i64::from(b), 4)
 }
 
 // --- 2026 -------------------------------------------------------------------

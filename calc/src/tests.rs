@@ -1479,15 +1479,11 @@ mod levy {
     use super::*;
     use taxkit::mock::{FUND, MOCK_LEVY, PLAIN};
 
+    /// The shared `taxed` context, pointed at the levying system. Built off it
+    /// rather than re-spelled, so a new `TaxContext` field is one edit in this
+    /// file rather than one per helper.
     fn levy_ctx(options: Vec<(String, String)>) -> TaxContext {
-        TaxContext {
-            system: &MOCK_LEVY,
-            region: "all".into(),
-            other_income: "0".into(),
-            age: "60".into(),
-            uprate: "0".into(),
-            options,
-        }
+        TaxContext { system: &MOCK_LEVY, options, ..taxed("0", "60") }
     }
 
     fn opt(id: &str, value: &str) -> (String, String) {
@@ -1501,14 +1497,9 @@ mod levy {
         horizon: &str,
         tax: TaxContext,
     ) -> CalcInput {
-        CalcInput {
-            investments,
-            horizon_value: horizon.into(),
-            horizon_unit: Unit::Months,
-            plan: Plan::Deposits,
-            currency: String::new(),
-            tax: Some(tax),
-        }
+        let mut input = deposits(investments, horizon, Unit::Months);
+        input.tax = Some(tax);
+        input
     }
 
     #[test]
@@ -1650,5 +1641,63 @@ mod levy {
         {
             assert!(*tax <= *gross, "month {i}: tax cannot exceed gross");
         }
+    }
+
+    #[test]
+    fn a_boundary_on_the_handover_does_not_open_an_empty_period() {
+        // A charging system anchors its tax periods at month zero, so a horizon
+        // that is a whole number of periods puts a boundary exactly on the
+        // handover — before a single withdrawal. Closing a period there would
+        // push an empty account count and halve the reported average. Both
+        // holdings are drawn every period, so the answer is 2 either way.
+        let portfolio = || {
+            vec![
+                account("Cash", PLAIN, "300000", "0", "0"),
+                account("Fund", FUND, "300000", "0", "0"),
+            ]
+        };
+        let aligned = calculate(&strategy_run(
+            portfolio(), "24", "24", "20000", Strategy::cheapest_first(), Some(levy_ctx(vec![])),
+        ))
+        .unwrap();
+        let offset = calculate(&strategy_run(
+            portfolio(), "25", "24", "20000", Strategy::cheapest_first(), Some(levy_ctx(vec![])),
+        ))
+        .unwrap();
+        assert!(
+            !aligned.accounts_touched.contains(&0),
+            "no period closes without a withdrawal in it: {:?}",
+            aligned.accounts_touched,
+        );
+        assert_eq!(
+            aligned.accounts_touched_typical, offset.accounts_touched_typical,
+            "whether the horizon lands on a period boundary cannot change the answer",
+        );
+        assert_eq!(aligned.accounts_touched_typical, Some(2));
+    }
+
+    #[test]
+    fn a_charge_never_books_more_than_the_holding_had() {
+        // The levy is measured on the period's *opening* value, so a holding that
+        // has since collapsed can owe more than it still holds. The pot floors at
+        // zero, and the charge booked must floor with it — `growth` adds the
+        // charge back, so over-booking it would report a gain that never happened.
+        let input = deposits_taxed(
+            vec![account("Fund", FUND, "1000000", "-99", "0")],
+            "24",
+            levy_ctx(vec![]),
+        );
+        let out = calculate(&input).unwrap();
+        assert!(out.projected_total >= d("0.00"), "the pot cannot go negative");
+        assert!(
+            out.charged_total <= d("1000000.00"),
+            "no more can be charged than was ever held: {}",
+            out.charged_total,
+        );
+        assert_eq!(
+            out.projected_total,
+            out.current_total + out.contributed_total - out.withdrawn_total - out.charged_total
+                + out.growth,
+        );
     }
 }

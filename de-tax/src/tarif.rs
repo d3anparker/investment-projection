@@ -47,13 +47,10 @@ use rust_decimal::MathematicalOps;
 use taxkit::ladder::Walk;
 use taxkit::{Draw, StopAt, TaxError};
 
-use crate::tables::TaxYear;
+use crate::tables::{bp, TaxYear};
 
 fn cents(c: i64) -> Decimal {
     Decimal::new(c, 2)
-}
-fn bp(b: u32) -> Decimal {
-    Decimal::new(i64::from(b), 4)
 }
 
 /// One segment of the charge curve. On `[lower, upper)`,
@@ -77,6 +74,18 @@ impl Seg {
         let d = i - self.lower;
         Decimal::TWO * self.a * d + self.b
     }
+}
+
+/// The segment holding income `i`: the first whose `upper` it falls below.
+///
+/// One function rather than the same loop written at each use, and total by
+/// construction — the last segment is always open-topped (`upper: None`), so the
+/// `unwrap_or` arm is unreachable rather than a guess. Used over both the §32a
+/// zones while the curve is being built and the finished total-charge segments.
+fn seg_at(segs: &[Seg], i: Decimal) -> &Seg {
+    segs.iter()
+        .find(|s| s.upper.is_none_or(|u| i < u))
+        .unwrap_or(&segs[segs.len() - 1])
 }
 
 /// The total charge curve for one set of rules, region (church rate) and filing
@@ -138,25 +147,11 @@ impl Tarif {
             Seg { lower: e3, upper: None, a: Decimal::ZERO, b: r45, c: r45 * e3 - cents(rules.zone5_sub_cents) * f },
         ];
 
-        let t_eval = |i: Decimal| -> Decimal {
-            for z in &zones {
-                if z.upper.map_or(true, |u| i < u) {
-                    return z.charge(i);
-                }
-            }
-            zones[zones.len() - 1].charge(i)
-        };
-        // Re-based quadratic (a, b_at_l, c_at_l) of the zone containing `l`.
-        let coeffs_at = |l: Decimal| -> (Decimal, Decimal, Decimal, Option<Decimal>) {
-            for z in &zones {
-                if z.upper.map_or(true, |u| l < u) {
-                    let d = l - z.lower;
-                    return (z.a, Decimal::TWO * z.a * d + z.b, z.charge(l), z.upper);
-                }
-            }
-            let z = &zones[zones.len() - 1];
-            let d = l - z.lower;
-            (z.a, Decimal::TWO * z.a * d + z.b, z.charge(l), z.upper)
+        let t_eval = |i: Decimal| -> Decimal { seg_at(&zones, i).charge(i) };
+        // The zone containing `l`, as a quadratic re-based to `l`: (a, b at l).
+        let coeffs_at = |l: Decimal| -> (Decimal, Decimal) {
+            let z = seg_at(&zones, l);
+            (z.a, Decimal::TWO * z.a * (l - z.lower) + z.b)
         };
 
         // Solve T(i) = target for the smallest i ≥ 0 (income at a given income
@@ -233,7 +228,7 @@ impl Tarif {
         let mut lower = Decimal::ZERO;
         let mut carry = Decimal::ZERO; // C evaluated at `lower`
         let make = |lower: Decimal, upper: Option<Decimal>, carry: Decimal| -> (Seg, Decimal) {
-            let (a, b_l, _c_l, _) = coeffs_at(lower);
+            let (a, b_l) = coeffs_at(lower);
             let probe = match upper {
                 Some(u) => (lower + u) / Decimal::TWO,
                 None => lower + Decimal::ONE,
@@ -263,26 +258,18 @@ impl Tarif {
         Ok(Tarif { segs })
     }
 
-    fn seg_at(&self, i: Decimal) -> &Seg {
-        for s in &self.segs {
-            if s.upper.map_or(true, |u| i < u) {
-                return s;
-            }
-        }
-        self.segs.last().expect("at least the open segment")
-    }
-
     /// Total charge on taxable income `i`.
     pub fn charge_at(&self, i: Decimal) -> Decimal {
         if i <= Decimal::ZERO {
             return Decimal::ZERO;
         }
-        self.seg_at(i).charge(i)
+        seg_at(&self.segs, i).charge(i)
     }
 
     /// Marginal charge rate at income `i` (dC/di), the total including surcharges.
     pub fn marginal_rate_at(&self, i: Decimal) -> Decimal {
-        self.seg_at(i.max(Decimal::ZERO)).rate(i.max(Decimal::ZERO))
+        let i = i.max(Decimal::ZERO);
+        seg_at(&self.segs, i).rate(i)
     }
 
     /// Net kept on the next unit of gross withdrawn from a pot whose taxable
@@ -421,13 +408,6 @@ mod tests {
         Tarif::build(LATEST, 0, false, Decimal::ONE).unwrap()
     }
 
-    fn income_tax_only() -> Tarif {
-        // Suppress Soli by building with a system whose Freigrenze is enormous —
-        // instead, we reason about marginal *income* tax below the Soli
-        // Freigrenze, where C == T exactly (no church, no soli).
-        t()
-    }
-
     fn approx(a: Decimal, b: &str) {
         let b: Decimal = b.parse().unwrap();
         let diff = (a - b).abs();
@@ -439,15 +419,13 @@ mod tests {
     #[test]
     fn the_tariff_is_continuous_in_value_at_every_zone_boundary() {
         let ty = LATEST;
-        let tt = income_tax_only();
+        let tt = t();
         for e in [ty.grundfreibetrag_eur, ty.zone2_top_eur, ty.zone3_top_eur] {
             let x = Decimal::from(e);
             let below = tt.charge_at(x - Decimal::ONE);
-            let at = tt.charge_at(x);
             let above = tt.charge_at(x + Decimal::ONE);
             // No jump: the value just below, at, and just above agree closely.
             assert!((above - below).abs() < Decimal::new(200, 2), "value jump at {e}");
-            let _ = at;
         }
     }
 
@@ -457,7 +435,7 @@ mod tests {
         // continuity that a mismatched coefficient set (the trap in the plan)
         // breaks.
         let ty = LATEST;
-        let tt = income_tax_only();
+        let tt = t();
         let e1 = Decimal::from(ty.zone2_top_eur);
         approx(tt.marginal_rate_at(e1 - Decimal::ONE), "0.2397");
         approx(tt.marginal_rate_at(e1 + Decimal::ONE), "0.2397");
@@ -466,7 +444,7 @@ mod tests {
     #[test]
     fn the_entry_and_top_marginal_rates_are_14_42_and_45_percent() {
         let ty = LATEST;
-        let tt = income_tax_only();
+        let tt = t();
         approx(tt.marginal_rate_at(Decimal::from(ty.grundfreibetrag_eur) + Decimal::ONE), "0.14");
         // Just above the top of zone 3: 42%.
         approx(tt.marginal_rate_at(Decimal::from(ty.zone3_top_eur) + Decimal::ONE), "0.42");

@@ -321,14 +321,35 @@ pub fn region_from(id: &str) -> String {
     }
 }
 
+/// Does a projection under `system`, taking money out with `strategy`, need to
+/// know about tax at all?
+///
+/// **The one place that rule is written down.** Three callers ask it — this
+/// module when building the projection's input, the strategy comparison when
+/// deciding which probes keep their context, and `app` when deciding whether to
+/// render the tax controls — and all three have to agree, because they answer
+/// different halves of one promise: that a figure the projection uses is a figure
+/// the form let you set.
+///
+/// A net (non-pro-rata) order needs it to price withdrawals. Pro-rata does not —
+/// it ignores tax entirely, and handing it a context would be misleading rather
+/// than merely wasteful, since the output would advertise a tax year it never
+/// used. The exception is a system that also charges for *holding*: that charge
+/// lands whatever order the money comes out in, so withholding the context there
+/// would not be honest tidiness but a missing charge. `calc` routes pro-rata's
+/// withdrawals through an empty session regardless, so they stay untaxed and
+/// gross — see `engine::project`'s `no_session`.
+pub fn keeps_tax_context(system: &dyn taxkit::TaxSystem, strategy: &Strategy) -> bool {
+    strategy.withdrawal_is_net() || system.has_periodic_charge()
+}
+
 /// The portfolio-level tax details, or `None` for an untaxed projection.
 ///
-/// Only built while drawing down, and only for a strategy that is not pro-rata:
-/// pro-rata ignores tax entirely, and handing it a context would be misleading
-/// rather than merely wasteful — the output would advertise a tax year it never
-/// used.
+/// Only built while drawing down, and only when [`keeps_tax_context`] says the
+/// active system and the chosen order need one.
 pub fn tax_from(f: &FormInput) -> Option<TaxContext> {
-    if strategy_from(&f.strategy, &f.rate_cap) == Strategy::pro_rata() {
+    let strategy = strategy_from(&f.strategy, &f.rate_cap);
+    if !keeps_tax_context(active_system(), &strategy) {
         return None;
     }
     tax_context(f)
@@ -352,7 +373,6 @@ pub fn tax_context(f: &FormInput) -> Option<TaxContext> {
         age: f.age.clone(),
         uprate: f.uprate.clone(),
         // Bespoke option values as declared by the picked jurisdiction's panel.
-
         options: f.options.clone(),
     })
 }

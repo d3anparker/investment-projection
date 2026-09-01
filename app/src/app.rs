@@ -156,12 +156,15 @@ pub fn App() -> impl IntoView {
         crate::jurisdiction::from_id(&state.jurisdiction).id.to_string(),
     );
     convert::set_active_system(crate::jurisdiction::system_from(&jurisdiction.get_untracked()));
-    let active_sys = move || crate::jurisdiction::system_from(&jurisdiction.get());
+    let active_sys = move || jurisdiction.with(|id| crate::jurisdiction::system_from(id));
     // The currency symbol, as a reactive context every figure reads through
-    // `format::currency`, so a jurisdiction switch re-renders them all.
-    provide_context(crate::format::ActiveCurrency(Signal::derive(move || {
-        active_sys().currency_symbol()
-    })));
+    // `format::currency`, so a jurisdiction switch re-renders them all. A *memo*,
+    // not `Signal::derive`: a derived signal is not cached in Leptos 0.6, so
+    // every `fmt_money` would re-run the catalogue lookup — once per money cell,
+    // per stat card and per axis label, on every keystroke. The symbol changes
+    // only when the jurisdiction does.
+    let currency = create_memo(move |_| active_sys().currency_symbol());
+    provide_context(crate::format::ActiveCurrency(currency.into()));
 
     let rows = create_rw_signal(
         state
@@ -199,8 +202,15 @@ pub fn App() -> impl IntoView {
     // drifts from it -- an unknown id used to render the whole tax fieldset for
     // a projection that was quietly running pro-rata and ignoring every field
     // in it.
+    // Asked of `convert`'s one predicate rather than spelled out again here: the
+    // controls have to appear exactly when the projection will use them, or a
+    // hidden field silently changes the figures.
     let tax_aware = move || {
-        is_drawdown() && convert::StrategyChoice::from_id(&strategy.get()) != convert::StrategyChoice::ProRata
+        is_drawdown()
+            && convert::keeps_tax_context(
+                active_sys(),
+                &convert::strategy_from(&strategy.get(), &rate_cap.get()),
+            )
     };
 
     // Goal-seek state. The target is blank in the example, which keeps the
@@ -915,8 +925,12 @@ pub fn App() -> impl IntoView {
                         {move || outcome.with(|o| {
                             o.result.as_ref().ok().and_then(|out| {
                                 let (label, checked) = (out.rules_label?, out.rules_as_of?);
-                                let line = freshness::as_of_line(convert::active_system(), label, checked);
-                                let stale = freshness::stale_note(convert::active_system(), today.get_value());
+                                // The reactive derivation, not the ambient one:
+                                // this closure would otherwise be correct only
+                                // because it happens to read `outcome` first.
+                                let system = active_sys();
+                                let line = freshness::as_of_line(system, label, checked);
+                                let stale = freshness::stale_note(system, today.get_value());
                                 Some(view! {
                                     <p class="tax-asof">{line}</p>
                                     // `role="note"`, never `role="alert"`: this is
