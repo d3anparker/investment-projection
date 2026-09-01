@@ -238,6 +238,12 @@ pub struct SessionSpec {
     pub age: Option<u32>,
     /// Annual uprating applied to thresholds, as a fraction. Zero means frozen.
     pub uprate: Decimal,
+    /// Extra inputs a tax system asked its own UI for, as (id, value) pairs.
+    /// Opaque here: `taxkit` neither names nor validates them, exactly as it
+    /// neither names nor parses an account-kind id. A system that wants none
+    /// reads none, so this stays empty for every jurisdiction that has not asked
+    /// for a bespoke control.
+    pub options: Vec<(String, String)>,
 }
 
 /// Whether a tax system's figures still look current.

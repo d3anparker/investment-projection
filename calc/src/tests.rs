@@ -89,6 +89,7 @@ use crate::types::NEUTRAL_CURRENCY;
             other_income: other_income.into(),
             age: age.into(),
             uprate: "0".into(),
+            options: Vec::new(),
         }
     }
 
@@ -1468,3 +1469,186 @@ let row = out.investments[0]
         let input = with_contribution("100000", "5", "0", "10", Unit::Years);
         assert!(solve(&input, &Goal::TimeToDeplete).is_err());
     }
+
+// --- MOCK_LEVY: the periodic-charge and options machinery ------------------
+//
+// Pinned against the fictional levying system, not real German figures, so a
+// Vorabpauschale rate change can no more break `calc` than an April UK change
+// can. These are the invariants a *charging* tax system adds.
+mod levy {
+    use super::*;
+    use taxkit::mock::{FUND, MOCK_LEVY, PLAIN};
+
+    fn levy_ctx(options: Vec<(String, String)>) -> TaxContext {
+        TaxContext {
+            system: &MOCK_LEVY,
+            region: "all".into(),
+            other_income: "0".into(),
+            age: "60".into(),
+            uprate: "0".into(),
+            options,
+        }
+    }
+
+    fn opt(id: &str, value: &str) -> (String, String) {
+        (id.into(), value.into())
+    }
+
+    /// Accumulation-only, but taxed — the charge fires while accumulating, which
+    /// `strategy_run` (always a drawdown) cannot express.
+    fn deposits_taxed(
+        investments: Vec<InvestmentInput>,
+        horizon: &str,
+        tax: TaxContext,
+    ) -> CalcInput {
+        CalcInput {
+            investments,
+            horizon_value: horizon.into(),
+            horizon_unit: Unit::Months,
+            plan: Plan::Deposits,
+            currency: String::new(),
+            tax: Some(tax),
+        }
+    }
+
+    #[test]
+    fn the_levy_lands_on_funds_and_sums_to_charged_total() {
+        // Two 100,000 holdings, 0% return, 24 months of accumulation. The one
+        // period boundary the loop reaches (month 12, charging the year [0,12))
+        // levies 2% of the fund's 100,000 opening = 2,000 taxable, less the
+        // 1,000 allowance, at 20% = 200. The plain account pays nothing.
+        let input = deposits_taxed(
+            vec![
+                account("Cash", PLAIN, "100000", "0", "0"),
+                account("Fund", FUND, "100000", "0", "0"),
+            ],
+            "24",
+            levy_ctx(vec![]),
+        );
+        let out = calculate(&input).unwrap();
+        assert_eq!(out.charged_total, d("200.00"));
+        assert_eq!(out.investments[0].charged, d("0.00"), "plain account is not levied");
+        assert_eq!(out.investments[1].charged, d("200.00"), "fund carries the whole charge");
+        // The charge came out of the pot.
+        assert_eq!(out.projected_total, d("199800.00"));
+    }
+
+    #[test]
+    fn zero_return_growth_is_zero_despite_the_levy_and_withdrawals() {
+        // The reconciliation test: at 0% return there is no investment gain, so
+        // `growth` must be exactly zero even though the levy and the withdrawals
+        // both move money out — each is added back in the growth identity.
+        let input = strategy_run(
+            vec![account("Fund", FUND, "1000000", "0", "0")],
+            "12",
+            "24",
+            "500",
+            Strategy::pro_rata(),
+            Some(levy_ctx(vec![])),
+        );
+        let out = calculate(&input).unwrap();
+        assert!(out.charged_total > d("0.00"), "the levy must actually fire");
+        assert_eq!(out.growth, d("0.00"), "a 0% return is zero growth, charge notwithstanding");
+        // The full identity, recomputed independently of `growth`.
+        assert_eq!(
+            out.projected_total,
+            out.current_total + out.contributed_total - out.withdrawn_total - out.charged_total
+                + out.growth,
+        );
+    }
+
+    #[test]
+    fn pro_rata_withdrawals_are_unchanged_by_the_levy() {
+        // Restated invariant (9): a periodic charge means pro-rata is no longer
+        // byte-identical to untaxed — the pot is smaller. But its *withdrawals*
+        // must be, because they never route through the session. A big pot and a
+        // small draw so nothing depletes in either run.
+        let portfolio = || vec![account("Fund", FUND, "1000000", "0", "0")];
+        let untaxed =
+            strategy_run(portfolio(), "12", "12", "500", Strategy::pro_rata(), None);
+        let levied = strategy_run(
+            portfolio(),
+            "12",
+            "12",
+            "500",
+            Strategy::pro_rata(),
+            Some(levy_ctx(vec![])),
+        );
+        let u = calculate(&untaxed).unwrap();
+        let l = calculate(&levied).unwrap();
+        assert_eq!(u.withdrawn_total, l.withdrawn_total, "withdrawal total unchanged");
+        assert_eq!(
+            u.investments[0].withdrawn, l.investments[0].withdrawn,
+            "per-row withdrawal unchanged"
+        );
+        assert_eq!(u.charged_total, d("0.00"), "no charge without a charging system");
+        assert!(l.charged_total > d("0.00"), "the levy fired");
+        assert!(l.projected_total < u.projected_total, "the levy shrank the pot");
+    }
+
+    #[test]
+    fn the_joint_option_doubles_the_allowance() {
+        // 24 months, one 100,000 fund. Single: 2,000 base − 1,000 allowance at
+        // 20% = 200. Joint doubles the allowance to 2,000, which covers the whole
+        // base, so nothing is charged.
+        let run = |options: Vec<(String, String)>| {
+            let input = deposits_taxed(
+                vec![account("Fund", FUND, "100000", "0", "0")],
+                "24",
+                levy_ctx(options),
+            );
+            calculate(&input).unwrap().charged_total
+        };
+        assert_eq!(run(vec![]), d("200.00"), "single assessment");
+        assert_eq!(run(vec![opt("joint", "true")]), d("0.00"), "joint covers the base");
+    }
+
+    #[test]
+    fn the_cohort_option_lowers_withdrawal_tax() {
+        // The cohort year halves the taxable fraction of a fund withdrawal from
+        // 2030 on. An ordered strategy (so withdrawals are actually taxed) drawn
+        // over two years; the later cohort pays strictly less tax.
+        let run = |cohort: &str| {
+            let input = strategy_run(
+                vec![account("Fund", FUND, "500000", "0", "0")],
+                "12",
+                "24",
+                "3000",
+                Strategy::cheapest_first(),
+                Some(levy_ctx(vec![opt("cohort", cohort)])),
+            );
+            calculate(&input).unwrap().tax_paid_total
+        };
+        let old_cohort = run("2020");
+        let new_cohort = run("2035");
+        assert!(old_cohort > d("0.00"), "the old cohort is taxed");
+        assert!(
+            new_cohort < old_cohort,
+            "the post-2030 cohort's half-taxable withdrawals cost less: {new_cohort} vs {old_cohort}",
+        );
+    }
+
+    #[test]
+    fn gross_is_still_net_plus_tax_under_a_levy() {
+        // The withdrawal identity holds pointwise even with a charge in play: the
+        // charge is a separate flow and never muddles gross/net/tax.
+        let input = strategy_run(
+            vec![account("Fund", FUND, "500000", "0", "0")],
+            "12",
+            "36",
+            "2000",
+            Strategy::cheapest_first(),
+            Some(levy_ctx(vec![])),
+        );
+        let out = calculate(&input).unwrap();
+        assert_eq!(out.withdrawn_total, out.net_withdrawn_total + out.tax_paid_total);
+        for (i, (gross, tax)) in out
+            .withdrawals_series
+            .iter()
+            .zip(out.tax_series.iter())
+            .enumerate()
+        {
+            assert!(*tax <= *gross, "month {i}: tax cannot exceed gross");
+        }
+    }
+}

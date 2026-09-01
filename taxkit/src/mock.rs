@@ -23,7 +23,7 @@ use rust_decimal::Decimal;
 
 use crate::ladder::{Ladder, Rung};
 use crate::{
-    AccountKind, Draw, Pot, Region, SessionSpec, SimpleDate, Staleness, StopAt, TaxError,
+    AccountKind, Draw, PeriodPot, Pot, Region, SessionSpec, SimpleDate, Staleness, StopAt, TaxError,
     TaxErrorKind, TaxSession, TaxSystem,
 };
 
@@ -247,6 +247,248 @@ impl TaxSession for MockSession {
 
     fn unused_allowance(&self) -> Decimal {
         self.banked_unused + self.unused_now()
+    }
+}
+
+// --- MOCK_LEVY: a fictional system that taxes *holding*, not just drawing -----
+//
+// The periodic-charge mechanism (`TaxSystem::has_periodic_charge` /
+// `TaxSession::period_charge`) and the opaque options channel
+// (`SessionSpec::options`) had, like every other part of this contract, exactly
+// one real consumer when they were added -- Germany. This second fake system is
+// what stops those additions quietly growing Germany's shape. It is kept
+// deliberately unlike `MOCK`: a wealth-style levy rather than only a withdrawal
+// tax, an allowance the levy and withdrawals *share*, a joint-assessment toggle,
+// and a cohort year -- the four things the new machinery has to express.
+//
+// Round numbers again. One period is twelve months.
+//
+// | Account | Taxation                                                          |
+// |---------|-------------------------------------------------------------------|
+// | `plain` | none at all (the untaxed default)                                 |
+// | `fund`  | 2% of the period's *opening* value is levied each period, and     |
+// |         | withdrawals are taxable too; both draw on one 1,000/period         |
+// |         | allowance, then pay 20%. The levy is charged first, at the period  |
+// |         | boundary, so it crowds out a later withdrawal's allowance.        |
+
+/// A ready-made instance of the levying system.
+pub static MOCK_LEVY: MockLevySystem = MockLevySystem;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MockLevySystem;
+
+pub const PLAIN: &str = "plain";
+pub const FUND: &str = "fund";
+
+/// Allowance the levy and withdrawals share each period.
+pub const LEVY_ALLOWANCE: i64 = 1_000;
+/// Option ids this system reads off `SessionSpec::options`.
+pub const OPT_JOINT: &str = "joint";
+pub const OPT_COHORT: &str = "cohort";
+/// A drawdown starting in this cohort year or later has only half its fund
+/// withdrawals taxable -- a stand-in for a cohort-fixed taxable share.
+pub const COHORT_PIVOT: u16 = 2030;
+
+const LEVY_ACCOUNTS: &[AccountKind] = &[
+    AccountKind {
+        id: PLAIN,
+        label: "Plain account",
+        short_label: "Plain",
+        needs_cost_basis: false,
+        age_gated: false,
+        modelled: true,
+        rank: 0,
+        note: "",
+    },
+    AccountKind {
+        id: FUND,
+        label: "Levied fund",
+        short_label: "Fund",
+        needs_cost_basis: false,
+        age_gated: false,
+        modelled: true,
+        rank: 1,
+        note: "Taxed 2% a year on its value, and on withdrawals.",
+    },
+];
+
+impl TaxSystem for MockLevySystem {
+    fn label(&self) -> &'static str {
+        "Levyland"
+    }
+
+    fn currency_symbol(&self) -> &'static str {
+        "\u{00a4}"
+    }
+
+    fn account_kinds(&self) -> &'static [AccountKind] {
+        LEVY_ACCOUNTS
+    }
+
+    fn regions(&self) -> &'static [Region] {
+        REGIONS
+    }
+
+    fn conventional_order(&self) -> &'static [&'static str] {
+        const ORDER: &[&str] = &[PLAIN, FUND];
+        ORDER
+    }
+
+    fn rules_label(&self) -> &'static str {
+        "levy-test"
+    }
+
+    fn as_of(&self) -> SimpleDate {
+        SimpleDate::new(2000, 1, 1)
+    }
+
+    fn source_note(&self) -> &'static str {
+        "Invented for testing a periodic charge. Not a real tax system."
+    }
+
+    fn staleness(&self, _today: SimpleDate) -> Staleness {
+        Staleness::Fresh
+    }
+
+    fn has_periodic_charge(&self) -> bool {
+        true
+    }
+
+    fn open(&self, spec: &SessionSpec) -> Result<Box<dyn TaxSession>, TaxError> {
+        if self.region(&spec.region).is_none() {
+            return Err(TaxError::new(
+                TaxErrorKind::BadRegion,
+                format!("'{}' is not a region of Levyland.", spec.region),
+            ));
+        }
+        let opt = |id: &str| {
+            spec.options
+                .iter()
+                .find(|(k, _)| k == id)
+                .map(|(_, v)| v.as_str())
+        };
+        let joint = opt(OPT_JOINT) == Some("true");
+        let cohort = opt(OPT_COHORT).and_then(|v| v.trim().parse::<u16>().ok());
+        Ok(Box::new(MockLevySession {
+            allowance: Decimal::from(LEVY_ALLOWANCE)
+                * if joint { Decimal::TWO } else { Decimal::ONE },
+            cohort,
+            used: Decimal::ZERO,
+            period_tax: Decimal::ZERO,
+            banked_unused: Decimal::ZERO,
+        }))
+    }
+}
+
+struct MockLevySession {
+    /// The (possibly joint-doubled) allowance per period.
+    allowance: Decimal,
+    /// Drawdown start year, if supplied -- halves fund withdrawal leak from
+    /// `COHORT_PIVOT` on.
+    cohort: Option<u16>,
+    /// Allowance consumed so far this period, by the levy and any withdrawals.
+    used: Decimal,
+    period_tax: Decimal,
+    banked_unused: Decimal,
+}
+
+impl MockLevySession {
+    fn rate(&self) -> Decimal {
+        Decimal::new(2, 1) // 0.20
+    }
+
+    fn remaining(&self) -> Decimal {
+        (self.allowance - self.used).max(Decimal::ZERO)
+    }
+
+    fn withdrawal_leak(&self) -> Decimal {
+        match self.cohort {
+            Some(y) if y >= COHORT_PIVOT => Decimal::new(5, 1), // 0.5
+            _ => Decimal::ONE,
+        }
+    }
+
+    fn ladder_for(&self, pot: &Pot) -> Result<Ladder, TaxError> {
+        match pot.kind {
+            PLAIN => Ok(Ladder::untaxed()),
+            FUND => {
+                let leak = self.withdrawal_leak();
+                let mut l = Ladder::new();
+                l.push(Rung { headroom: Some(self.remaining()), rate: Decimal::ZERO, leak })?;
+                l.push(Rung { headroom: None, rate: self.rate(), leak })?;
+                Ok(l)
+            }
+            other => Err(TaxError::new(
+                TaxErrorKind::UnknownAccount,
+                format!("'{other}' is not an account kind in Levyland."),
+            )),
+        }
+    }
+}
+
+impl TaxSession for MockLevySession {
+    fn period_months(&self) -> u32 {
+        12
+    }
+
+    fn start_period(&mut self) {
+        self.banked_unused += self.remaining();
+        self.used = Decimal::ZERO;
+        self.period_tax = Decimal::ZERO;
+    }
+
+    fn marginal_keep(&self, pot: &Pot) -> Decimal {
+        self.ladder_for(pot)
+            .map(|l| l.marginal_keep())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    fn marginal_headroom(&self, pot: &Pot) -> Option<Decimal> {
+        self.ladder_for(pot).ok().and_then(|l| l.marginal_headroom())
+    }
+
+    fn draw(&mut self, pot: &Pot, net_wanted: Decimal, stop: StopAt) -> Result<Draw, TaxError> {
+        let ladder = self.ladder_for(pot)?;
+        let walk = ladder.walk(pot.available, net_wanted, stop)?;
+        if pot.kind == FUND {
+            // The taxable slice consumes the shared allowance, capped at what the
+            // free rung actually held.
+            self.used += walk.taxable.min(self.remaining());
+        }
+        self.period_tax += walk.draw.tax;
+        Ok(walk.draw)
+    }
+
+    fn period_charge(
+        &mut self,
+        pots: &[PeriodPot],
+        charges: &mut [Decimal],
+    ) -> Result<(), TaxError> {
+        let fraction = Decimal::new(2, 2); // 0.02
+        for (i, p) in pots.iter().enumerate() {
+            if p.pot.kind == FUND {
+                // 2% of the opening value is the taxable base; it runs the free
+                // rung first, then 20%, and consumes the shared allowance.
+                let base = (p.opening * fraction).max(Decimal::ZERO);
+                let free = base.min(self.remaining());
+                let taxed = (base - free).max(Decimal::ZERO);
+                let charge = taxed * self.rate();
+                self.used += free;
+                self.period_tax += charge;
+                charges[i] = charge;
+            } else {
+                charges[i] = Decimal::ZERO;
+            }
+        }
+        Ok(())
+    }
+
+    fn period_tax(&self) -> Decimal {
+        self.period_tax
+    }
+
+    fn unused_allowance(&self) -> Decimal {
+        self.banked_unused + self.remaining()
     }
 }
 

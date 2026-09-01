@@ -88,6 +88,10 @@ pub struct TaxContext {
     /// freezes them, which is the honest default under a policy of freezes but
     /// materially pessimistic over a thirty-year drawdown — hence the control.
     pub uprate: String,
+    /// Bespoke per-jurisdiction inputs, as (id, value) string pairs, passed
+    /// through to the tax system opaquely. Empty for a jurisdiction that asks
+    /// for no extra controls. `calc` never interprets these.
+    pub options: Vec<(String, String)>,
 }
 
 impl PartialEq for TaxContext {
@@ -105,6 +109,7 @@ impl PartialEq for TaxContext {
             && self.other_income == other.other_income
             && self.age == other.age
             && self.uprate == other.uprate
+            && self.options == other.options
     }
 }
 
@@ -119,6 +124,7 @@ impl std::fmt::Debug for TaxContext {
             .field("other_income", &self.other_income)
             .field("age", &self.age)
             .field("uprate", &self.uprate)
+            .field("options", &self.options)
             .finish()
     }
 }
