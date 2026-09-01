@@ -208,7 +208,12 @@ pub enum StopAt {
 }
 
 /// Everything a tax system needs in order to open a session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Default`-derived and deliberately **not** `#[non_exhaustive]`: new fields
+/// are added here as tax systems need them, and every construction site spreads
+/// `..Default::default()` so a new field is one line at the definition rather
+/// than a break at each caller. A system ignores any field it does not use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionSpec {
     /// An id from [`TaxSystem::regions`].
     pub region: String,
