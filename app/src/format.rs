@@ -1,7 +1,17 @@
 //! Display formatting: turning the `calc` core's `Decimal`s into the strings
 //! shown in the UI. Pure and side-effect free.
 
+use leptos::SignalGet;
 use rust_decimal::Decimal;
+
+/// The active currency symbol, as a reactive context value.
+///
+/// Provided once at the `App` root and read by [`currency`]. A context signal
+/// rather than a plain global so a jurisdiction switch reactively re-renders
+/// every figure — and it is read only on the render path, never inside the
+/// projection memo, so the arithmetic stays a pure function of the form.
+#[derive(Clone, Copy)]
+pub struct ActiveCurrency(pub leptos::Signal<&'static str>);
 
 /// Group an integer digit string into thousands, e.g. `"1234567" -> "1,234,567"`.
 pub fn group_thousands(int_digits: &str) -> String {
@@ -16,10 +26,17 @@ pub fn group_thousands(int_digits: &str) -> String {
     out
 }
 
-/// The currency to print amounts in, taken from the active tax system rather
-/// than hard-coded — the last place the render path assumed a jurisdiction.
+/// The currency to print amounts in: the active tax system's symbol, read from
+/// the [`ActiveCurrency`] context so a jurisdiction switch updates every figure.
+///
+/// Reading it inside a render closure subscribes that closure to jurisdiction
+/// changes. Off the reactive runtime (the native `format` unit tests) there is
+/// no context, so it falls back to the default jurisdiction's symbol — which is
+/// what those tests assert.
 pub fn currency() -> &'static str {
-    crate::convert::TAX_SYSTEM.currency_symbol()
+    leptos::use_context::<ActiveCurrency>()
+        .map(|c| c.0.get())
+        .unwrap_or_else(|| crate::jurisdiction::system_from("").currency_symbol())
 }
 
 /// Format a monetary amount as `1,234.56` behind the active currency symbol

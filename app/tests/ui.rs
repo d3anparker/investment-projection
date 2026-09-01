@@ -500,7 +500,7 @@ fn taxed_state(rows: Vec<RowData>, strategy: &str) -> ShareState {
 /// The account kinds the app is actually wired to, asked of the tax system so a
 /// test never hard-codes a jurisdiction's wrappers.
 fn kinds() -> &'static [taxkit::AccountKind] {
-    app::convert::TAX_SYSTEM.account_kinds()
+    app::convert::active_system().account_kinds()
 }
 
 #[wasm_bindgen_test]
@@ -698,7 +698,7 @@ async fn tax_figures_always_carry_the_rules_they_used() {
         harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
     let line = harness::text(&root, ".tax-asof");
     assert!(
-        line.contains(app::convert::TAX_SYSTEM.rules_label()),
+        line.contains(app::convert::active_system().rules_label()),
         "a tax figure without a date is one you cannot judge: {line}"
     );
 
@@ -747,6 +747,7 @@ fn state_of(rows: Vec<RowData>, horizon_value: &str, horizon_unit: &str) -> Shar
         age: String::new(),
         uprate: String::new(),
         options: std::collections::BTreeMap::new(),
+        jurisdiction: String::new(),
     }
 }
 
@@ -762,6 +763,75 @@ fn money(pounds: u64, pence: u64) -> String {
         grouped.push(*c);
     }
     format!("\u{00a3}{grouped}.{pence:02}")
+}
+
+// =====================================================================
+// The jurisdiction picker (Phase C)
+// =====================================================================
+
+/// A drawdown state seeded under Germany.
+fn de_state(rows: Vec<RowData>, strategy: &str) -> ShareState {
+    let mut s = taxed_state(rows, strategy);
+    s.jurisdiction = "de".into();
+    s
+}
+
+#[wasm_bindgen_test]
+async fn a_german_link_uses_euro_and_the_german_catalogue() {
+    let root = harness::mount_with(&de_state(vec![row("Depot", "100000", "5", "0")], "cheapest"));
+    harness::settle().await;
+    let summary = harness::text(&root, ".panel-summary");
+    assert!(summary.contains('\u{20ac}'), "figures show the euro: {summary}");
+    assert!(!summary.contains('\u{00a3}'), "no pound under Germany: {summary}");
+
+    let values: Vec<String> = harness::qa(&root, ".fld-account option")
+        .iter()
+        .map(|o| o.get_attribute("value").unwrap_or_default())
+        .collect();
+    let expected: Vec<String> = app::jurisdiction::system_from("de")
+        .account_kinds()
+        .iter()
+        .map(|k| k.id.to_string())
+        .collect();
+    assert_eq!(values, expected, "the account select is the German catalogue");
+}
+
+#[wasm_bindgen_test]
+async fn switching_the_picker_changes_the_currency_even_in_deposits_mode() {
+    // Deposits mode is the exacting case: the projection numbers are identical
+    // between jurisdictions (no tax), so only the currency symbol changes — the
+    // panel must still re-render.
+    let root = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    assert!(harness::text(&root, ".panel-summary").contains('\u{00a3}'), "starts in pounds");
+
+    let pick = harness::q(&root, ".jurisdiction-pick select");
+    let sel: web_sys::HtmlSelectElement = pick.clone().dyn_into().unwrap();
+    sel.set_value("de");
+    harness::dispatch_change(&pick).await;
+    harness::settle().await;
+
+    let summary = harness::text(&root, ".panel-summary");
+    assert!(summary.contains('\u{20ac}'), "switches to euro: {summary}");
+    assert!(!summary.contains('\u{00a3}'), "and drops the pound: {summary}");
+}
+
+#[wasm_bindgen_test]
+async fn the_german_settings_panel_mounts_only_under_germany() {
+    let uk = harness::mount_with(&taxed_state(vec![row("Fund", "10000", "7", "0")], "cheapest"));
+    assert!(
+        harness::q_opt(&uk, ".system-options").is_none(),
+        "the UK declares no bespoke controls, so nothing mounts"
+    );
+    let de = harness::mount_with(&de_state(vec![row("Depot", "100000", "5", "0")], "cheapest"));
+    assert!(
+        harness::q_opt(&de, ".system-options").is_some(),
+        "Germany mounts its assessment/base-year panel"
+    );
+    // Switching mode is unaffected by the jurisdiction: still drawing down.
+    assert!(
+        harness::q_opt(&de, ".tax-settings").is_some(),
+        "the drawdown tax fieldset is present under Germany too"
+    );
 }
 
 // =====================================================================

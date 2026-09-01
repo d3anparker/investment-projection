@@ -56,7 +56,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             .any(|w| w[0].account_kind != w[1].account_kind);
     // Resolved through the catalogue, never matched against a named wrapper.
     let account_label = |id: &str| {
-        crate::convert::TAX_SYSTEM
+        crate::convert::active_system()
             .account_kind(id)
             .map_or_else(String::new, |k| k.label.to_string())
     };

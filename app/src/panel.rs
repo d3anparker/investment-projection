@@ -33,6 +33,11 @@ where
     E: IntoView,
 {
     move || {
+        // Subscribe to the active currency so a jurisdiction switch re-renders
+        // the figures even when the projection itself is unchanged (deposits
+        // mode, where only the symbol differs). Reading it here, in the body
+        // closure, is what wires that dependency in.
+        let _ = crate::format::currency();
         displayed.with(|current| match current {
             Some(out) => view! {
                 <div class="results-body" class:stale=move || stale.get()

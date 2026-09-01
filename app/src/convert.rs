@@ -15,12 +15,31 @@
 
 use calc::{CalcInput, InvestmentInput, Plan, Strategy, TaxContext, Unit};
 
-/// The tax system this build of the app is wired to.
-///
-/// **The only place the app names a jurisdiction.** Every control that mentions
-/// an account, a region or a currency is populated from this, so swapping the
-/// line swaps the whole tax model and nothing else in `app` changes.
-pub const TAX_SYSTEM: &dyn taxkit::TaxSystem = &uk_tax::UK;
+use std::cell::Cell;
+
+thread_local! {
+    /// The tax system the projection is currently built against. Set from a
+    /// form's `jurisdiction` field at the top of [`build_input`], so every
+    /// downstream resolver (`kind_from`, `region_from`, `tax_context`, …) and
+    /// every rendered figure agrees with the picked jurisdiction. The concrete
+    /// jurisdiction crates are named only in [`crate::jurisdiction`]; `convert`
+    /// reaches them through it, so no jurisdiction leaks into this module.
+    static ACTIVE: Cell<&'static dyn taxkit::TaxSystem> =
+        Cell::new(crate::jurisdiction::system_from(crate::jurisdiction::default_id()));
+}
+
+/// The tax system the app is currently projecting against. Read by every control
+/// that mentions an account, a region or a currency.
+pub fn active_system() -> &'static dyn taxkit::TaxSystem {
+    ACTIVE.with(|c| c.get())
+}
+
+/// Point the app at a jurisdiction's tax system. Called from [`build_input`]
+/// (from the form's `jurisdiction` field) so the logic path and the render path
+/// never disagree about which system is live.
+pub fn set_active_system(system: &'static dyn taxkit::TaxSystem) {
+    ACTIVE.with(|c| c.set(system));
+}
 
 /// A plain-string snapshot of one editor row, decoupled from the reactive
 /// `Row`'s signals so the input-building logic can be tested without a runtime.
@@ -73,6 +92,12 @@ pub struct FormInput {
     pub other_income: String,
     pub age: String,
     pub uprate: String,
+    /// Which jurisdiction's tax system to project against, as a `jurisdiction`
+    /// catalogue id. Blank/unknown resolves to the default (first) jurisdiction.
+    pub jurisdiction: String,
+    /// Bespoke per-jurisdiction option values, `(id, value)`, passed opaquely to
+    /// the tax system. Empty for a jurisdiction with no bespoke controls.
+    pub options: Vec<(String, String)>,
 }
 
 /// Build the `calc` input from the current form, dropping blank rows. Returns the
@@ -80,6 +105,8 @@ pub struct FormInput {
 /// `CalcError`'s index (into `CalcInput::investments`) can be mapped back to the
 /// row on screen that caused it.
 pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
+    // Point the resolvers and the render at the form's jurisdiction first.
+    set_active_system(crate::jurisdiction::system_from(&f.jurisdiction));
     let mut row_ids = Vec::new();
     let investments: Vec<InvestmentInput> = f
         .rows
@@ -116,9 +143,9 @@ pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
         horizon_value: blank_zero(&f.horizon_value),
         horizon_unit: unit_from(&f.horizon_unit),
         plan: plan_from(f),
-        // The one jurisdiction is named here (`TAX_SYSTEM`); `calc` prints
-        // whatever symbol it is handed, in taxed and untaxed modes alike.
-        currency: TAX_SYSTEM.currency_symbol().to_string(),
+        // `calc` prints whatever symbol it is handed, in taxed and untaxed modes
+        // alike; here it is the active jurisdiction's.
+        currency: active_system().currency_symbol().to_string(),
         tax: tax_from(f),
     };
     (input, row_ids)
@@ -259,7 +286,7 @@ impl StrategyChoice {
 
 /// The tax system's conventional spend order, as owned strings.
 pub fn conventional_order() -> Vec<String> {
-    TAX_SYSTEM
+    active_system()
         .conventional_order()
         .iter()
         .map(|s| (*s).to_string())
@@ -277,20 +304,20 @@ pub fn strategy_from(strategy: &str, rate_cap: &str) -> Strategy {
 /// link built against a different catalogue still opens.
 pub fn kind_from(id: &str) -> String {
     let id = id.trim();
-    if TAX_SYSTEM.account_kind(id).is_some() {
+    if active_system().account_kind(id).is_some() {
         id.to_string()
     } else {
-        TAX_SYSTEM.default_account_kind().map_or(String::new(), |k| k.id.to_string())
+        active_system().default_account_kind().map_or(String::new(), |k| k.id.to_string())
     }
 }
 
 /// A region id, checked the same way.
 pub fn region_from(id: &str) -> String {
     let id = id.trim();
-    if TAX_SYSTEM.region(id).is_some() {
+    if active_system().region(id).is_some() {
         id.to_string()
     } else {
-        TAX_SYSTEM.regions().first().map_or(String::new(), |r| r.id.to_string())
+        active_system().regions().first().map_or(String::new(), |r| r.id.to_string())
     }
 }
 
@@ -319,14 +346,14 @@ pub fn tax_context(f: &FormInput) -> Option<TaxContext> {
         return None;
     }
     Some(TaxContext {
-        system: TAX_SYSTEM,
+        system: active_system(),
         region: region_from(&f.region),
         other_income: f.other_income.clone(),
         age: f.age.clone(),
         uprate: f.uprate.clone(),
-        // No jurisdiction declares bespoke options yet (Phase C wires the app
-        // controls); an empty map is the untouched default.
-        options: Vec::new(),
+        // Bespoke option values as declared by the picked jurisdiction's panel.
+
+        options: f.options.clone(),
     })
 }
 
@@ -360,6 +387,8 @@ mod tests {
             other_income: String::new(),
             age: String::new(),
             uprate: String::new(),
+            jurisdiction: String::new(),
+            options: Vec::new(),
         }
     }
 
@@ -456,7 +485,7 @@ mod tests {
     fn the_conventional_order_comes_from_the_tax_system() {
         // Which accounts are spent first follows from how they are taxed, so it
         // is the tax system's judgement and must never be written out here.
-        let expected: Vec<String> = TAX_SYSTEM
+        let expected: Vec<String> = active_system()
             .conventional_order()
             .iter()
             .map(|s| (*s).to_string())
@@ -466,14 +495,14 @@ mod tests {
 
     #[test]
     fn unknown_account_and_region_ids_fall_back_rather_than_erroring() {
-        let first_kind = TAX_SYSTEM.account_kinds()[0].id;
+        let first_kind = active_system().account_kinds()[0].id;
         assert_eq!(kind_from("not_a_real_account"), first_kind);
         assert_eq!(kind_from(""), first_kind, "a pre-accounts link is untaxed");
         // A real id survives, whitespace and all.
-        let real = TAX_SYSTEM.account_kinds().last().unwrap().id;
+        let real = active_system().account_kinds().last().unwrap().id;
         assert_eq!(kind_from(&format!("  {real} ")), real);
 
-        let first_region = TAX_SYSTEM.regions()[0].id;
+        let first_region = active_system().regions()[0].id;
         assert_eq!(region_from("narnia"), first_region);
         assert_eq!(region_from(""), first_region);
     }
@@ -489,7 +518,7 @@ mod tests {
         assert!(tax_from(&deposits).is_none());
 
         let taxed = tax_from(&drawing("2000", StrategyChoice::Cheapest.id())).expect("a tax-aware order needs one");
-        assert_eq!(taxed.region, TAX_SYSTEM.regions()[0].id);
+        assert_eq!(taxed.region, active_system().regions()[0].id);
     }
 
     #[test]

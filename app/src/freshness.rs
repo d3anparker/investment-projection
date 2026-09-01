@@ -66,12 +66,12 @@ pub fn stale_note(system: &dyn TaxSystem, today: SimpleDate) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::convert::TAX_SYSTEM;
+    use crate::convert::active_system;
 
     #[test]
     fn the_as_of_line_names_the_system_the_rules_and_the_date() {
-        let line = as_of_line(TAX_SYSTEM, "2026/27", SimpleDate::new(2026, 4, 6));
-        assert!(line.contains(TAX_SYSTEM.label()), "{line}");
+        let line = as_of_line(active_system(), "2026/27", SimpleDate::new(2026, 4, 6));
+        assert!(line.contains(active_system().label()), "{line}");
         assert!(line.contains("2026/27"), "{line}");
         assert!(line.contains("6 April 2026"), "{line}");
     }
@@ -80,15 +80,15 @@ mod tests {
     fn figures_are_not_flagged_while_the_system_calls_them_fresh() {
         // Whatever the tax system's own cycle is, the day it was checked is
         // certainly not stale.
-        assert!(stale_note(TAX_SYSTEM, TAX_SYSTEM.as_of()).is_none());
+        assert!(stale_note(active_system(), active_system().as_of()).is_none());
     }
 
     #[test]
     fn a_stale_warning_names_both_periods_and_never_refuses() {
         // Far enough ahead that any jurisdiction's rules have turned over.
-        let much_later = SimpleDate::new(TAX_SYSTEM.as_of().year + 5, 6, 1);
-        let note = stale_note(TAX_SYSTEM, much_later).expect("five years on must be stale");
-        assert!(note.contains(TAX_SYSTEM.rules_label()), "names what it used: {note}");
+        let much_later = SimpleDate::new(active_system().as_of().year + 5, 6, 1);
+        let note = stale_note(active_system(), much_later).expect("five years on must be stale");
+        assert!(note.contains(active_system().rules_label()), "names what it used: {note}");
         assert!(
             note.contains("still runs"),
             "the warning must not read as a refusal: {note}"

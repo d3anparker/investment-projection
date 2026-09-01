@@ -10,6 +10,7 @@ calc = { path = "../calc" }
 taxkit = { path = "../taxkit" }
 # The one line that names a jurisdiction; see `convert::TAX_SYSTEM`.
 uk-tax = { path = "../uk-tax" }
+de-tax = { path = "../de-tax" }
 rust_decimal = { version = "1", features = ["maths"] }
 console_error_panic_hook = "0.1"
 # The shareable link is a base64url-encoded JSON snapshot of the form state
