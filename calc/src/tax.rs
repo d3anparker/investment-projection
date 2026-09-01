@@ -46,7 +46,7 @@ impl Ledger<'_> {
 /// row — an account kind the system does not recognise — name that row's
 /// account picker, rather than stranding its message at the foot of the form.
 /// Portfolio-level failures (a bad region, negative other income) ignore it.
-fn tax_error(e: TaxError, holding: Option<usize>) -> CalcError {
+pub(crate) fn tax_error(e: TaxError, holding: Option<usize>) -> CalcError {
     let field = match e.kind {
         TaxErrorKind::BadRegion => Some(Field::Region),
         TaxErrorKind::BadOtherIncome => Some(Field::OtherIncome),

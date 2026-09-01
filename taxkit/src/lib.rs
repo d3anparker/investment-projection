@@ -167,6 +167,20 @@ impl Pot {
     }
 }
 
+/// A holding, plus what it was worth when the current tax period opened.
+///
+/// Separate from [`Pot`] rather than a field on it: `Pot` means "this holding,
+/// right now", and is passed by value on the hot withdrawal path where an
+/// opening value would be dead weight. A periodic charge is the one caller that
+/// needs the period's starting value, so it gets its own type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeriodPot {
+    pub pot: Pot,
+    /// Value at the start of the tax period now ending. What a charge on the
+    /// period's growth is measured against.
+    pub opening: Decimal,
+}
+
 /// The cost of one withdrawal.
 ///
 /// `gross - tax == net` exactly; no rounding happens inside a draw (see the
@@ -373,6 +387,15 @@ pub trait TaxSystem: Sync {
 
     /// Begin a projection.
     fn open(&self, spec: &SessionSpec) -> Result<Box<dyn TaxSession>, TaxError>;
+
+    /// Whether this system charges tax for merely *holding* over a period, as
+    /// well as for withdrawing. Defaulted `false`: a system that only taxes
+    /// withdrawals — the common case, and every one modelled before Germany —
+    /// inherits it and is never asked for a periodic charge, so its projection
+    /// is bit-for-bit what it was before this method existed.
+    fn has_periodic_charge(&self) -> bool {
+        false
+    }
 }
 
 /// One projection's tax state: allowances consumed so far this period, plus
@@ -428,6 +451,29 @@ pub trait TaxSession {
     /// and rounding per draw would accumulate a systematic drift over hundreds
     /// of months.
     fn draw(&mut self, pot: &Pot, net_wanted: Decimal, stop: StopAt) -> Result<Draw, TaxError>;
+
+    /// Tax owed for *holding* the portfolio over the period just completed,
+    /// rather than for withdrawing from it. One charge per pot, written into
+    /// `charges` positionally, and committed to this session's own ledger — a
+    /// charge can consume an allowance that a later withdrawal would otherwise
+    /// have used, so it must post the same way a draw does. Like [`draw`], it
+    /// must **not** round.
+    ///
+    /// The caller owns the `charges` buffer, sized to `pots`: this runs once per
+    /// period, but a goal-seek runs the whole projection tens of thousands of
+    /// times, and allocating a fresh `Vec` here would be one per year per run.
+    /// Only reached when [`TaxSystem::has_periodic_charge`] is set; the default
+    /// zeroes the buffer, which is why a withdrawal-only system pays nothing.
+    ///
+    /// [`draw`]: Self::draw
+    fn period_charge(
+        &mut self,
+        _pots: &[PeriodPot],
+        charges: &mut [Decimal],
+    ) -> Result<(), TaxError> {
+        charges.fill(Decimal::ZERO);
+        Ok(())
+    }
 
     /// Tax charged so far in the current period.
     fn period_tax(&self) -> Decimal;
