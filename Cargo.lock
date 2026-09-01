@@ -342,6 +342,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "de-tax"
+version = "0.1.0"
+dependencies = [
+ "rust_decimal",
+ "taxkit",
+]
+
+[[package]]
 name = "derive-where"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
