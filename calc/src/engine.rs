@@ -6,11 +6,11 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
-use taxkit::{StopAt, TaxSession};
+use taxkit::{PeriodPot, Pot, StopAt, TaxSession};
 
 use crate::parse::{overflowed, parse_number, parse_or_zero, round2, to_months, too_large_msg};
 use crate::strategy::{Limit, Order, Strategy};
-use crate::tax::{draw_one, open_session, priority_of, Ledger, Priority};
+use crate::tax::{draw_one, open_session, priority_of, tax_error, Ledger, Priority};
 use crate::types::{
     CalcError, CalcInput, CalcOutput, Field, InvestmentField, InvestmentInput, InvestmentResult, Plan,
     TaxContext, Unit,
@@ -461,16 +461,22 @@ pub(crate) fn prepare_holdings(
 
 /// Open the tax session a projection needs, or `None` when it needs none.
 ///
-/// Pro-rata never opens one — that is what keeps it byte-identical to the untaxed
-/// model. `PreserveGrowth` uses one if a tax context is present but does not
-/// require it (it orders by return); the tax-aware orders require one and say so
-/// when it is missing.
+/// Two reasons to open one. A tax-ordered withdrawal needs to price draws
+/// (pro-rata never does — that is what keeps it byte-identical to the untaxed
+/// model). And a system that charges tax for *holding* needs a session in both
+/// phases, whatever the strategy: the charge is levied even while accumulating,
+/// and even under pro-rata (whose *withdrawals* still go untaxed — see
+/// `project`). `PreserveGrowth` uses a session if a context is present but does
+/// not require one; the tax-aware orders require one and say so when it is
+/// missing.
 pub(crate) fn open_if_ordered(
     tax: &Option<TaxContext>,
     strategy: &Strategy,
     drawing: bool,
 ) -> Result<Option<Box<dyn TaxSession>>, CalcError> {
-    if !(drawing && strategy.order != Order::ProRata) {
+    let ordered = drawing && strategy.order != Order::ProRata;
+    let charging = tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
+    if !(ordered || charging) {
         return Ok(None);
     }
     match tax {
@@ -507,16 +513,20 @@ pub(crate) struct Run {
     pub(crate) contribs: Vec<Decimal>,
     pub(crate) withdraws: Vec<Decimal>,
     pub(crate) taxed: Vec<Decimal>,
+    /// Raw cumulative periodic charge, parallel to `totals`.
+    pub(crate) charges_cum: Vec<Decimal>,
     /// Final per-holding balance and cumulative flows.
     pub(crate) balances: Vec<Decimal>,
     pub(crate) contributed: Vec<Decimal>,
     pub(crate) withdrawn: Vec<Decimal>,
     pub(crate) taxes: Vec<Decimal>,
+    pub(crate) charged: Vec<Decimal>,
     pub(crate) handover: Vec<Option<Decimal>>,
     pub(crate) row_depletion: Vec<Option<u32>>,
     pub(crate) contributed_total: Decimal,
     pub(crate) withdrawn_total: Decimal,
     pub(crate) tax_total: Decimal,
+    pub(crate) charged_total: Decimal,
     pub(crate) depletion_month: Option<u32>,
     pub(crate) accounts_touched: Vec<usize>,
     pub(crate) period_months: Option<u32>,
@@ -542,6 +552,7 @@ pub(crate) fn project(
     groups: &[Vec<usize>],
     rate_cap: Option<Decimal>,
     session: &mut Option<Box<dyn TaxSession>>,
+    charging: bool,
 ) -> Result<Run, CalcError> {
     let n = prepared.len();
     let horizon = horizon_months as usize;
@@ -557,6 +568,7 @@ pub(crate) fn project(
     let mut contributed: Vec<Decimal> = vec![Decimal::ZERO; n];
     let mut withdrawn: Vec<Decimal> = vec![Decimal::ZERO; n];
     let mut taxes: Vec<Decimal> = vec![Decimal::ZERO; n];
+    let mut charged: Vec<Decimal> = vec![Decimal::ZERO; n];
     let mut handover: Vec<Option<Decimal>> = vec![None; n];
     let mut row_depletion: Vec<Option<u32>> = vec![None; n];
     // Whether a holding has ever actually held anything. Tracked rather than
@@ -576,6 +588,21 @@ pub(crate) fn project(
     // out-of-contention set. Both are overwritten in full before each use.
     let mut before: Vec<Decimal> = vec![Decimal::ZERO; n];
     let mut blocked: Vec<bool> = vec![false; n];
+    // Periodic-charge scratch: `period_opening` snapshots each holding at the
+    // start of the current tax period; the charge is measured against it. The
+    // pots and charge buffers are reused each boundary rather than reallocated —
+    // a goal-seek runs the whole projection tens of thousands of times.
+    let mut period_opening: Vec<Decimal> = balances.clone();
+    let mut period_pots: Vec<PeriodPot> = Vec::with_capacity(n);
+    let mut charge_buf: Vec<Decimal> = vec![Decimal::ZERO; n];
+    // Pro-rata prices no withdrawal through the session even when one exists for
+    // a holding charge: its splits stay gross. Routing its draws through this
+    // always-empty session is what keeps pro-rata byte-identical to untaxed.
+    let mut no_session: Option<Box<dyn TaxSession>> = None;
+    // A charge is anchored to the start of the projection, because it accrues
+    // while accumulating; a pricing-only session (no charge) has no accumulation
+    // bookkeeping and keeps the handover as its period anchor, as before.
+    let anchor = if charging { 0 } else { horizon };
     let mut accounts_touched: Vec<usize> = Vec::new();
     let mut period_kinds: Vec<&str> = Vec::new();
     let mut rate_cap_breached = false;
@@ -585,9 +612,11 @@ pub(crate) fn project(
     let mut contribs: Vec<Decimal> = vec![Decimal::ZERO; total + 1];
     let mut withdraws: Vec<Decimal> = vec![Decimal::ZERO; total + 1];
     let mut taxed: Vec<Decimal> = vec![Decimal::ZERO; total + 1];
+    let mut charges_cum: Vec<Decimal> = vec![Decimal::ZERO; total + 1];
     let mut contributed_total = Decimal::ZERO;
     let mut withdrawn_total = Decimal::ZERO;
     let mut tax_total = Decimal::ZERO;
+    let mut charged_total = Decimal::ZERO;
 
     // Rate-attributed and contribution-attributed overflow helpers for the loop.
     let grow_too_large = |index: usize| CalcError::at(too_large_msg(&prepared[index].name), index, InvestmentField::Rate);
@@ -606,6 +635,7 @@ pub(crate) fn project(
         contribs[i] = contributed_total;
         withdraws[i] = withdrawn_total;
         taxed[i] = tax_total;
+        charges_cum[i] = charged_total;
 
         // A holding is spent the first month it reaches zero having had
         // something in it. Under pro-rata they all land together; under an
@@ -631,6 +661,67 @@ pub(crate) fn project(
             break; // endpoint: record only, apply no flow.
         }
 
+        // Tax-period boundary and the periodic holding charge, spanning both
+        // phases. Anchored at `anchor` — month zero when a system charges for
+        // holding (the charge accrues while accumulating), the handover
+        // otherwise. At `m == 0` snapshot the period's opening values; at each
+        // whole-period boundary levy the charge for the period just ended, roll
+        // the session into a fresh period, and re-snapshot. Only a tax system
+        // defines a period, so an untaxed projection (no session) skips it all
+        // and stays a single period. Placed before this month's growth so the
+        // charge lands as part of the same month's movement in the series.
+        //
+        // Tax periods are anchored to a projection month, never to a real
+        // calendar date: a date would make the projection depend on when it was
+        // run, breaking shared links and failing the browser suite every year
+        // boundary, and would manufacture a stub first period carrying a full
+        // year's allowances (they are not pro-rated for part periods).
+        if session.is_some() && i >= anchor {
+            let m = i - anchor;
+            if m == 0 {
+                period_opening.copy_from_slice(&balances);
+            } else if m % period_len == 0 {
+                // The charge for the period just ended, measured on its opening
+                // values. It posts to the session's own ledger (consuming any
+                // allowance a later draw would have used); here we only deduct it
+                // from the balance and book it as its own flow.
+                if charging {
+                    period_pots.clear();
+                    for j in 0..n {
+                        let kind = prepared[j].kind.map_or("", |k| k.id);
+                        period_pots.push(PeriodPot {
+                            pot: Pot { kind, available: balances[j], cost_basis: basis[j] },
+                            opening: period_opening[j],
+                        });
+                    }
+                    if let Some(s) = session.as_mut() {
+                        s.period_charge(&period_pots, &mut charge_buf)
+                            .map_err(|e| tax_error(e, None))?;
+                    }
+                    for j in 0..n {
+                        let c = charge_buf[j];
+                        if c > Decimal::ZERO {
+                            balances[j] = (balances[j] - c).max(Decimal::ZERO);
+                            charged[j] = charged[j].checked_add(c).ok_or_else(overflowed)?;
+                            charged_total =
+                                charged_total.checked_add(c).ok_or_else(overflowed)?;
+                        }
+                    }
+                }
+                if let Some(s) = session.as_mut() {
+                    s.start_period();
+                }
+                // Per-period account-touch bookkeeping is a drawdown, net-order
+                // concern only: pro-rata touches nothing tax-ordered, and an
+                // accumulation period draws nothing at all.
+                if ordered && i >= horizon {
+                    accounts_touched.push(period_kinds.len());
+                    period_kinds.clear();
+                }
+                period_opening.copy_from_slice(&balances);
+            }
+        }
+
         // Grow every holding one month.
         for j in 0..n {
             balances[j] = balances[j].checked_mul(prepared[j].monthly).ok_or_else(|| grow_too_large(j))?;
@@ -651,26 +742,6 @@ pub(crate) fn project(
             // in pocket, so the gross leaving the investments is whatever delivers
             // it after tax. `ordered` gates the tax-period bookkeeping, meaningless
             // for pro-rata (no session, gross == net).
-            //
-            // Tax periods are anchored to the *handover*, not to a real calendar
-            // date and not to month zero. A real date would make the projection
-            // depend on when it was run, which would break shared links and make
-            // the browser suite fail every April; either alternative would also
-            // manufacture a stub first period carrying a full year's allowances,
-            // since allowances are not pro-rated for part periods.
-            let month_of_drawdown = i - horizon;
-            // Month zero opens the first period rather than closing one, so the
-            // boundary only bites from the second period on. Only a tax system
-            // defines a period: without a session there is nothing to reset and
-            // no fiscal year to bucket into, so the whole drawdown stays one
-            // period (`PreserveGrowth` on an untaxed projection takes this path).
-            if session.is_some() && month_of_drawdown > 0 && month_of_drawdown % period_len == 0 {
-                if let Some(s) = session.as_mut() {
-                    s.start_period();
-                }
-                accounts_touched.push(period_kinds.len());
-                period_kinds.clear();
-            }
 
             before.copy_from_slice(&balances);
             let mut led = Ledger {
@@ -680,16 +751,20 @@ pub(crate) fn project(
                 withdrawn: &mut withdrawn,
                 taxes: &mut taxes,
             };
+            // The session prices withdrawals only for a net (ordered) strategy;
+            // pro-rata draws through `no_session`, so a charge-only session never
+            // touches them.
+            let ws = if ordered { &mut *session } else { &mut no_session };
             match &strategy.order {
                 // Dynamic: a greedy argmax, re-ranked at every rate boundary.
                 Order::ByMarginalCost => {
-                    let (_, breached) = greedy_month(session, &mut led, withdrawal, rate_cap, &mut blocked)?;
+                    let (_, breached) = greedy_month(ws, &mut led, withdrawal, rate_cap, &mut blocked)?;
                     rate_cap_breached |= breached;
                 }
                 // Static: a fixed apportionment across `groups` — pro-rata being
                 // one group of every holding.
                 _ => {
-                    static_month(session, &mut led, groups, withdrawal)?;
+                    static_month(ws, &mut led, groups, withdrawal)?;
                 }
             }
 
@@ -739,15 +814,18 @@ pub(crate) fn project(
         contribs,
         withdraws,
         taxed,
+        charges_cum,
         balances,
         contributed,
         withdrawn,
         taxes,
+        charged,
         handover,
         row_depletion,
         contributed_total,
         withdrawn_total,
         tax_total,
+        charged_total,
         depletion_month,
         accounts_touched,
         period_months,
@@ -781,21 +859,25 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     // Open the session (retained past the run for its allowance/rules figures)
     // and settle the static draw order, then run the month loop.
     let mut session = open_if_ordered(&input.tax, &pp.strategy, drawing)?;
+    let charging = input.tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
     let groups = groups_for(&pp.strategy, &prepared);
     let Run {
         totals,
         contribs,
         withdraws,
         taxed,
+        charges_cum,
         balances,
         contributed,
         withdrawn,
         taxes,
+        charged,
         handover,
         row_depletion,
         contributed_total,
         withdrawn_total,
         tax_total,
+        charged_total,
         depletion_month,
         accounts_touched,
         period_months,
@@ -809,6 +891,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         &groups,
         pp.rate_cap,
         &mut session,
+        charging,
     )?;
 
     let series: Vec<Decimal> = totals.iter().map(|v| round2(*v)).collect();
@@ -819,6 +902,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     let handover_total = if drawing { Some(round2(totals[horizon])) } else { None };
     let contributed_total = round2(contributed_total);
     let withdrawn_total = round2(withdrawn_total);
+    let charged_total = round2(charged_total);
 
     // `depletion_month`, `accounts_touched` and `period_months` all come off the
     // `Run` above — the month loop that produces them lives in `project` now.
@@ -860,6 +944,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
                 projected_value: round2(balances[j]),
                 tax_paid: tax,
                 net_withdrawn: gross - tax,
+                charged: round2(charged[j]),
                 depletion_month: row_depletion[j],
                 account_kind: p.kind_id.clone(),
             }
@@ -872,9 +957,12 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     let net_contributed = contributed_total
         .checked_sub(withdrawn_total)
         .ok_or_else(overflowed)?;
+    // A periodic holding charge is added back too (like withdrawals): it shrinks
+    // the pot but is tax on holding, not a negative return.
     let growth = projected_total
         .checked_sub(current_total)
         .and_then(|g| g.checked_sub(net_contributed))
+        .and_then(|g| g.checked_add(charged_total))
         .ok_or_else(overflowed)?;
     let deployed = current_total
         .checked_add(contributed_total)
@@ -882,6 +970,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     let growth_pct = growth.checked_div(deployed).unwrap_or(Decimal::ZERO);
 
     let tax_series: Vec<Decimal> = taxed.iter().map(|v| round2(*v)).collect();
+    let charged_series: Vec<Decimal> = charges_cum.iter().map(|v| round2(*v)).collect();
     let tax_paid_total = round2(tax_total);
     let net_withdrawn_total = withdrawn_total - tax_paid_total;
     let effective_tax_rate = tax_paid_total
@@ -909,6 +998,8 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         tax_paid_total,
         net_withdrawn_total,
         effective_tax_rate,
+        charged_series,
+        charged_total,
         unused_allowance_total,
         period_months,
         accounts_touched,

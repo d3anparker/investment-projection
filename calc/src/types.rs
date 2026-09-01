@@ -261,6 +261,11 @@ pub struct InvestmentResult {
     pub tax_paid: Decimal,
     /// `withdrawn - tax_paid`: what reached the holder from this holding.
     pub net_withdrawn: Decimal,
+    /// Periodic tax charged on this holding for merely holding it over the
+    /// projection (a wealth/accrual charge, not a withdrawal tax). Always zero
+    /// unless the tax system sets `has_periodic_charge`. Reported for the same
+    /// reconciliation reason as `contributed`: it reduces `projected_value`.
+    pub charged: Decimal,
     /// The month this holding first hit £0, as an *absolute* index into
     /// `series`. Only meaningful once an ordered strategy can empty holdings at
     /// different times — under pro-rata they all empty together.
@@ -308,8 +313,9 @@ pub struct CalcOutput {
     pub projected_total: Decimal,
     /// Projected investment gain: the final value less today's value *and* less
     /// the *net* cash you moved in along the way (deposits minus withdrawals), so
-    /// it reflects returns only. Withdrawals are added back — money you took out
-    /// is not an investment loss.
+    /// it reflects returns only. Withdrawals — and any periodic charge — are
+    /// added back: neither money you took out nor tax on holding is an
+    /// investment loss.
     pub growth: Decimal,
     /// `growth` as a fraction of the capital deployed (today's value plus total
     /// deposits). A simple return on capital, not an IRR.
@@ -337,6 +343,17 @@ pub struct CalcOutput {
     pub net_withdrawn_total: Decimal,
     /// `tax_paid_total / withdrawn_total`, zero when nothing was withdrawn.
     pub effective_tax_rate: Decimal,
+
+    // --- periodic charge ----------------------------------------------------
+    // A charge for *holding* rather than withdrawing (Germany's Vorabpauschale).
+    // Zero for every withdrawal-only tax system, so these fields leave the UK
+    // projection untouched. A charge reduces the pot without being a withdrawal
+    // or a return, so it is its own flow — see the amended `growth` definition.
+    /// Cumulative periodic charge by each month, parallel to `series`. May rise
+    /// in *both* phases: you are taxed on the holding whether or not you draw.
+    pub charged_series: Vec<Decimal>,
+    /// Total periodic charge levied across the whole projection.
+    pub charged_total: Decimal,
     /// Tax-free headroom that went unclaimed across the drawdown.
     ///
     /// The "show your working" figure: it is what explains *why* one withdrawal
