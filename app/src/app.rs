@@ -391,6 +391,9 @@ pub fn App() -> impl IntoView {
             other_income: other_income.get(),
             age: age.get(),
             uprate: uprate.get(),
+            // No jurisdiction control emits options yet (Phase C wires the picker
+            // and its panels); an empty map round-trips unchanged.
+            options: Default::default(),
         };
         // Write the fragment with replace_state so the shared link doesn't pile
         // up Back-button history entries. The status is set inside (address-bar

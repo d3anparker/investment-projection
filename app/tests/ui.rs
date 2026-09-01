@@ -746,6 +746,7 @@ fn state_of(rows: Vec<RowData>, horizon_value: &str, horizon_unit: &str) -> Shar
         other_income: String::new(),
         age: String::new(),
         uprate: String::new(),
+        options: std::collections::BTreeMap::new(),
     }
 }
 

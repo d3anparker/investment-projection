@@ -41,6 +41,9 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
     // Tax columns only when tax was actually charged, so an untaxed or pro-rata
     // projection keeps the table it always had.
     let has_tax = !out.tax_paid_total.is_zero();
+    // A periodic holding charge (Germany's Vorabpauschale) gets its own column
+    // only when one was levied, so a UK or untaxed run keeps its existing table.
+    let has_charge = !out.charged_total.is_zero();
     // The account column is worth its width only once accounts differ; a
     // portfolio all in one wrapper says nothing by repeating it on every row.
     // Only while drawing down, matching the editor: in deposits mode the account
@@ -203,7 +206,16 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                 }
             };
             let tax_cell = has_tax.then(|| view! { <td class="num">{split(r.tax_paid)}</td> });
-            let net_cell = has_tax.then(|| view! { <td class="num">{split(r.net_withdrawn)}</td> });            let account_cell =
+            let net_cell = has_tax.then(|| view! { <td class="num">{split(r.net_withdrawn)}</td> });
+            let charged_cell = has_charge.then(|| {
+                let cell = if r.charged.is_zero() {
+                    "{2014}".to_string()
+                } else {
+                    fmt_money(r.charged)
+                };
+                view! { <td class="num">{cell}</td> }
+            });
+            let account_cell =
                 has_accounts.then(|| view! { <td>{account_label(&r.account_kind)}</td> });
             view! {
                 <tr>
@@ -215,6 +227,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                     {withdrawn}
                     {tax_cell}
                     {net_cell}
+                    {charged_cell}
                     <td class="num">{fmt_pct(r.annualised)}</td>
                     <td class="num">{fmt_money(r.projected_value)}</td>
                 </tr>
@@ -300,6 +313,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                         })}
                         {has_tax.then(|| view! { <th scope="col">"Tax"</th> })}
                         {has_tax.then(|| view! { <th scope="col">"Kept"</th> })}
+                        {has_charge.then(|| view! { <th scope="col">"Charged while invested"</th> })}
                         <th scope="col">"Annualised"</th>
                         <th scope="col">"Projected"</th>
                     </tr>

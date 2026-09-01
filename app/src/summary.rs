@@ -84,6 +84,20 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
             </div>
         }
     });
+    // A periodic charge (tax on merely holding, e.g. Germany's Vorabpauschale)
+    // only appears when a charging system actually levied one, so every
+    // withdrawal-only jurisdiction keeps exactly the summary it had. It spans
+    // both phases, hence the total horizon label rather than the drawdown one.
+    let charged_stat = (!out.charged_total.is_zero()).then(|| {
+        view! {
+            <div class="stat">
+                <span class="stat-label">{format!("Tax while invested over {}", horizon_label(span))}</span>
+                <span class="stat-value">{fmt_money(out.charged_total)}</span>
+                <span class="stat-note">"charged on the holdings, not on withdrawals"</span>
+            </div>
+        }
+    });
+
     // The headline of a drawdown: when the whole portfolio empties before the
     // drawdown period is up, say so plainly. It is the point of the feature, so it
     // sits above the stat cards rather than as one more number among them.
@@ -115,6 +129,7 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
             {withdrawals_stat}
             {tax_stat}
             {net_stat}
+            {charged_stat}
             <div class="stat">
                 // The label carries the direction too, so gain vs loss does not
                 // rest on green-vs-red alone.
