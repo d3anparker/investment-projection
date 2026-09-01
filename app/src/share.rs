@@ -62,6 +62,12 @@ pub struct ShareState {
     /// Annual uprating of tax thresholds, as a percent. Blank freezes them.
     #[serde(default)]
     pub uprate: String,
+    /// Bespoke per-jurisdiction option values, keyed by option id. A `BTreeMap`
+    /// so the encoded JSON is order-stable and the same form always yields the
+    /// same link. `#[serde(default)]`, like every tax control, so it is added
+    /// without a `VERSION` bump: an older link decodes it empty.
+    #[serde(default)]
+    pub options: std::collections::BTreeMap<String, String>,
 }
 
 fn default_horizon_value() -> String {
@@ -133,6 +139,7 @@ impl ShareState {
             other_income: String::new(),
             age: String::new(),
             uprate: String::new(),
+            options: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -238,6 +245,7 @@ mod tests {
             other_income: "12000".into(),
             age: "60".into(),
             uprate: "2".into(),
+            options: [("joint".to_string(), "true".to_string())].into_iter().collect(),
         }
     }
 
