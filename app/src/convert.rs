@@ -324,6 +324,9 @@ pub fn tax_context(f: &FormInput) -> Option<TaxContext> {
         other_income: f.other_income.clone(),
         age: f.age.clone(),
         uprate: f.uprate.clone(),
+        // No jurisdiction declares bespoke options yet (Phase C wires the app
+        // controls); an empty map is the untouched default.
+        options: Vec::new(),
     })
 }
 
