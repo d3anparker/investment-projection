@@ -1,12 +1,13 @@
 //! The jurisdiction catalogue and its bespoke UI panels — the only place in
 //! `app` that names a tax jurisdiction.
 //!
-//! Each [`Jurisdiction`] pairs a `taxkit::TaxSystem` with up to three optional
-//! panel functions the page mounts at fixed points. A jurisdiction with no
-//! bespoke controls (the UK) leaves them `None` and nothing renders, exactly as
-//! before. Germany fills the settings and notes slots; the row slot stays unused
-//! (see the note in `de-tax`'s catalogue on why a per-holding option would mean
-//! a lifetime on `taxkit::Pot`).
+//! Each [`Jurisdiction`] pairs a `taxkit::TaxSystem` with optional panel
+//! functions the page mounts at fixed points. A jurisdiction with no bespoke
+//! controls (the UK) leaves them `None` and nothing renders, exactly as before;
+//! Germany fills both. A *per-holding* slot is deliberately absent rather than
+//! stubbed out: nothing needs one yet, and it would want a lifetime on
+//! `taxkit::Pot` — a shape worth designing against a real caller rather than
+//! guessing at, so it arrives with its first user.
 //!
 //! Panels are stored as `fn` pointers so the catalogue stays a `const`. A Leptos
 //! 0.6 component returns an unnameable `impl IntoView`, so each function returns
@@ -29,8 +30,6 @@ pub struct Jurisdiction {
     pub system: &'static dyn taxkit::TaxSystem,
     /// Portfolio-level controls, inside `.tax-settings`. `None` renders nothing.
     pub settings_panel: Option<fn(SettingsSlot) -> View>,
-    /// Per-holding controls. Unused so far — kept for composability.
-    pub row_panel: Option<fn(RowSlot) -> View>,
     /// Explanation of this jurisdiction's own figures, under the output panels.
     pub notes_panel: Option<fn(NotesSlot) -> View>,
 }
@@ -42,14 +41,6 @@ pub struct Jurisdiction {
 pub struct SettingsSlot {
     pub options: RwSignal<BTreeMap<String, String>>,
     pub today_year: u16,
-}
-
-/// What a per-holding panel would be handed. Defined for composability; nothing
-/// fills the slot yet.
-#[derive(Clone, Copy)]
-pub struct RowSlot {
-    pub row_id: usize,
-    pub options: RwSignal<BTreeMap<String, String>>,
 }
 
 /// What a notes panel is handed. Currently nothing — the German notes are
@@ -64,7 +55,6 @@ pub const JURISDICTIONS: &[Jurisdiction] = &[
         label: "United Kingdom",
         system: &uk_tax::UK,
         settings_panel: None,
-        row_panel: None,
         notes_panel: None,
     },
     Jurisdiction {
@@ -72,7 +62,6 @@ pub const JURISDICTIONS: &[Jurisdiction] = &[
         label: "Germany",
         system: &de_tax::DE,
         settings_panel: Some(de::settings),
-        row_panel: None,
         notes_panel: Some(de::notes),
     },
 ];

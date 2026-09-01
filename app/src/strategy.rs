@@ -23,7 +23,7 @@
 use calc::{calculate, CalcInput, CalcOutput, Limit, Order, Plan, Strategy};
 use leptos::*;
 
-use crate::convert::{active_system, StrategyChoice};
+use crate::convert::{active_system, keeps_tax_context, StrategyChoice};
 use crate::format::{fmt_money, month_label};
 
 /// One strategy's outcome, reduced to the figures the table shows.
@@ -149,6 +149,10 @@ pub fn compare(input: &CalcInput) -> Vec<Comparison> {
     if !matches!(input.plan, Plan::Drawdown { .. }) {
         return Vec::new();
     }
+    // Off the input, not off the ambient active system: `compare` is documented
+    // as a function of its argument, and it runs from a *debounced* signal, so
+    // the two can be a keystroke apart.
+    let system = input.tax.as_ref().map(|t| t.system);
 
     candidates()
         .into_iter()
@@ -158,10 +162,12 @@ pub fn compare(input: &CalcInput) -> Vec<Comparison> {
             if let Plan::Drawdown { strategy: s, .. } = &mut probe.plan {
                 *s = strategy.clone();
             }
-            // Pro-rata ignores tax, so handing it a context would make its row
-            // claim a tax year it never used. Same rule as `convert::tax_from`,
-            // asked of the strategy rather than spelled out again.
-            if !strategy.withdrawal_is_net() {
+            // The shared rule, not a second spelling of it: strip the context
+            // from a probe that would not use it. Getting this wrong here is
+            // quiet — a pro-rata row that kept a charge it never paid, or one
+            // whose "left at the end" flatters it by exactly the charge every
+            // other row paid.
+            if system.is_some_and(|sys| !keeps_tax_context(sys, &strategy)) {
                 probe.tax = None;
             }
             match calculate(&probe) {

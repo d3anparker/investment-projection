@@ -459,6 +459,22 @@ pub(crate) fn prepare_holdings(
     Ok(prepared)
 }
 
+/// The tax session a projection needs, and whether that system charges for
+/// merely *holding*.
+///
+/// The two travel together because they are decided together: `charging` is one
+/// of the two reasons a session gets opened at all, and every reader of the flag
+/// is about to use the session it justifies. Deriving it separately at each call
+/// site let the pair drift — a caller could hand `project` a charging system with
+/// `charging: false` and get a silently uncharged projection, with no compile
+/// error and no panic, just a pot a few percent too big.
+pub(crate) struct SessionPlan {
+    pub(crate) session: Option<Box<dyn TaxSession>>,
+    /// The system taxes holding as well as withdrawing, so a periodic charge has
+    /// to be levied at every period boundary in *both* phases.
+    pub(crate) charging: bool,
+}
+
 /// Open the tax session a projection needs, or `None` when it needs none.
 ///
 /// Two reasons to open one. A tax-ordered withdrawal needs to price draws
@@ -473,20 +489,21 @@ pub(crate) fn open_if_ordered(
     tax: &Option<TaxContext>,
     strategy: &Strategy,
     drawing: bool,
-) -> Result<Option<Box<dyn TaxSession>>, CalcError> {
+) -> Result<SessionPlan, CalcError> {
     let ordered = drawing && strategy.order != Order::ProRata;
     let charging = tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
+    let plan = |session| SessionPlan { session, charging };
     if !(ordered || charging) {
-        return Ok(None);
+        return Ok(plan(None));
     }
     match tax {
-        Some(t) => Ok(Some(open_session(t)?)),
+        Some(t) => Ok(plan(Some(open_session(t)?))),
         None if strategy.needs_tax() => Err(CalcError::new(
             "This withdrawal order needs to know how the accounts are taxed. \
              Fill in the tax details, or split the withdrawal pro-rata instead.",
             Some(Field::Strategy),
         )),
-        None => Ok(None),
+        None => Ok(plan(None)),
     }
 }
 
@@ -541,8 +558,8 @@ pub(crate) struct Run {
 /// split depends on every holding's current balance at once, so per-holding state
 /// cannot run in isolation.
 ///
-/// The `session` is borrowed mutably so the caller retains it afterwards for the
-/// unused-allowance and rules-label figures the ledger holds.
+/// The `plan` is borrowed mutably so the caller retains its session afterwards
+/// for the unused-allowance and rules-label figures the ledger holds.
 pub(crate) fn project(
     prepared: &[Prepared],
     horizon_months: u32,
@@ -551,9 +568,10 @@ pub(crate) fn project(
     strategy: &Strategy,
     groups: &[Vec<usize>],
     rate_cap: Option<Decimal>,
-    session: &mut Option<Box<dyn TaxSession>>,
-    charging: bool,
+    plan: &mut SessionPlan,
 ) -> Result<Run, CalcError> {
+    let SessionPlan { session, charging } = plan;
+    let charging = *charging;
     let n = prepared.len();
     let horizon = horizon_months as usize;
     let total = (horizon_months + drawdown_months) as usize;
@@ -591,10 +609,16 @@ pub(crate) fn project(
     // Periodic-charge scratch: `period_opening` snapshots each holding at the
     // start of the current tax period; the charge is measured against it. The
     // pots and charge buffers are reused each boundary rather than reallocated —
-    // a goal-seek runs the whole projection tens of thousands of times.
-    let mut period_opening: Vec<Decimal> = balances.clone();
-    let mut period_pots: Vec<PeriodPot> = Vec::with_capacity(n);
-    let mut charge_buf: Vec<Decimal> = vec![Decimal::ZERO; n];
+    // a goal-seek runs the whole projection tens of thousands of times. Left
+    // empty unless a charge can actually be levied: every other projection —
+    // untaxed, or any withdrawal-only system — would otherwise pay three
+    // allocations per run for buffers nothing reads.
+    let mut period_opening: Vec<Decimal> =
+        if charging { balances.clone() } else { Vec::new() };
+    let mut period_pots: Vec<PeriodPot> =
+        Vec::with_capacity(if charging { n } else { 0 });
+    let mut charge_buf: Vec<Decimal> =
+        if charging { vec![Decimal::ZERO; n] } else { Vec::new() };
     // Pro-rata prices no withdrawal through the session even when one exists for
     // a holding charge: its splits stay gross. Routing its draws through this
     // always-empty session is what keeps pro-rata byte-identical to untaxed.
@@ -676,10 +700,12 @@ pub(crate) fn project(
         // run, breaking shared links and failing the browser suite every year
         // boundary, and would manufacture a stub first period carrying a full
         // year's allowances (they are not pro-rated for part periods).
-        if session.is_some() && i >= anchor {
+        if let Some(s) = session.as_mut().filter(|_| i >= anchor) {
             let m = i - anchor;
             if m == 0 {
-                period_opening.copy_from_slice(&balances);
+                if charging {
+                    period_opening.copy_from_slice(&balances);
+                }
             } else if m % period_len == 0 {
                 // The charge for the period just ended, measured on its opening
                 // values. It posts to the session's own ledger (consuming any
@@ -694,31 +720,35 @@ pub(crate) fn project(
                             opening: period_opening[j],
                         });
                     }
-                    if let Some(s) = session.as_mut() {
-                        s.period_charge(&period_pots, &mut charge_buf)
-                            .map_err(|e| tax_error(e, None))?;
-                    }
+                    s.period_charge(&period_pots, &mut charge_buf)
+                        .map_err(|e| tax_error(e, None))?;
                     for j in 0..n {
-                        let c = charge_buf[j];
+                        // Capped at what the holding still has: a charge levied
+                        // on the period's *opening* value can outrun a balance
+                        // that has since fallen, and booking more than actually
+                        // left the pot would inflate `growth`, which adds the
+                        // charge back.
+                        let c = charge_buf[j].min(balances[j]).max(Decimal::ZERO);
                         if c > Decimal::ZERO {
-                            balances[j] = (balances[j] - c).max(Decimal::ZERO);
+                            balances[j] -= c;
                             charged[j] = charged[j].checked_add(c).ok_or_else(overflowed)?;
                             charged_total =
                                 charged_total.checked_add(c).ok_or_else(overflowed)?;
                         }
                     }
+                    period_opening.copy_from_slice(&balances);
                 }
-                if let Some(s) = session.as_mut() {
-                    s.start_period();
-                }
+                s.start_period();
                 // Per-period account-touch bookkeeping is a drawdown, net-order
                 // concern only: pro-rata touches nothing tax-ordered, and an
-                // accumulation period draws nothing at all.
-                if ordered && i >= horizon {
+                // accumulation period draws nothing at all. Strictly `>`: under a
+                // charging system the anchor is month zero, so a boundary can land
+                // *on* the handover, before a single withdrawal — closing a period
+                // there would push an empty count and halve the reported average.
+                if ordered && i > horizon {
                     accounts_touched.push(period_kinds.len());
                     period_kinds.clear();
                 }
-                period_opening.copy_from_slice(&balances);
             }
         }
 
@@ -858,8 +888,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
 
     // Open the session (retained past the run for its allowance/rules figures)
     // and settle the static draw order, then run the month loop.
-    let mut session = open_if_ordered(&input.tax, &pp.strategy, drawing)?;
-    let charging = input.tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
+    let mut plan = open_if_ordered(&input.tax, &pp.strategy, drawing)?;
     let groups = groups_for(&pp.strategy, &prepared);
     let Run {
         totals,
@@ -890,8 +919,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         &pp.strategy,
         &groups,
         pp.rate_cap,
-        &mut session,
-        charging,
+        &mut plan,
     )?;
 
     let series: Vec<Decimal> = totals.iter().map(|v| round2(*v)).collect();
@@ -911,7 +939,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     // ignores tax entirely, so advertising which tax year it used would imply a
     // calculation it never did -- and it is what keeps pro-rata byte-identical
     // to the untaxed model.
-    let (rules_label, rules_as_of) = match (&session, &input.tax) {
+    let (rules_label, rules_as_of) = match (&plan.session, &input.tax) {
         (Some(_), Some(t)) => (Some(t.system.rules_label()), Some(t.system.as_of())),
         _ => (None, None),
     };
@@ -921,7 +949,8 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         let periods = accounts_touched.len();
         (total * 2 + periods) / (periods * 2)
     });
-    let unused_allowance_total = session
+    let unused_allowance_total = plan
+        .session
         .as_ref()
         .map_or(Decimal::ZERO, |s| round2(s.unused_allowance()));
 

@@ -1055,13 +1055,14 @@ input[type="number"]::-webkit-inner-spin-button {
   font-size: 0.82rem;
   color: var(--muted);
 }
+/* Only what differs from the base `input, select` skin: a tighter box, and the
+   panel background rather than the sunken one, because this sits on the mode
+   switch rather than in a form. Restating the rest is how a colour token that
+   exists in neither theme got in here twice. */
 .jurisdiction-pick select {
+  width: auto;
   padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
   background: var(--panel);
-  color: var(--fg);
-  font: inherit;
 }
 
 /* A jurisdiction's own controls, mounted inside the tax-settings fieldset. */
@@ -1078,18 +1079,12 @@ input[type="number"]::-webkit-inner-spin-button {
   flex-direction: column;
   gap: 4px;
 }
-.system-options .fld-label {
-  font-size: 0.82rem;
-  color: var(--muted);
-}
+/* The caption uses the shared `.fld-lbl`, so nothing is restated here. The
+   controls take only the tighter box; border, radius, colour and font come from
+   the base `input, select` rule. */
 .system-options select,
 .system-options input {
   padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--fg);
-  font: inherit;
 }
 .system-options-note,
 .system-notes {

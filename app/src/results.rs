@@ -209,7 +209,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             let net_cell = has_tax.then(|| view! { <td class="num">{split(r.net_withdrawn)}</td> });
             let charged_cell = has_charge.then(|| {
                 let cell = if r.charged.is_zero() {
-                    "{2014}".to_string()
+                    "\u{2014}".to_string()
                 } else {
                     fmt_money(r.charged)
                 };

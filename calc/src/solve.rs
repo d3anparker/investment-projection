@@ -138,7 +138,6 @@ fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> 
     // horizon, spread evenly across the holdings ("a portfolio top-up is shared
     // equally"). Deposits-only — no drawdown, no session — whatever mode the
     // input came from, because a top-up is a deposit.
-    let charging = input.tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
     let mut projected_with = |top_up: Decimal| -> Result<Decimal, CalcError> {
         let each = top_up / n;
         for p in prepared.iter_mut() {
@@ -147,8 +146,8 @@ fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> 
         // A charging system (Germany) taxes the holding even while accumulating,
         // so a top-up goal must feel that drag too; a withdrawal-only system opens
         // no session here and the run is untaxed exactly as before.
-        let mut session = open_if_ordered(&input.tax, &Strategy::pro_rata(), false)?;
-        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::pro_rata(), &[], None, &mut session, charging)?;
+        let mut plan = open_if_ordered(&input.tax, &Strategy::pro_rata(), false)?;
+        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::pro_rata(), &[], None, &mut plan)?;
         Ok(round2(*run.totals.last().expect("horizon >= 1 guarantees a point")))
     };
 
@@ -228,14 +227,13 @@ fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
     let rate_cap = rate_cap_of(strategy)?;
     let prepared = prepare_for(input)?;
     let groups = groups_for(strategy, &prepared);
-    let charging = input.tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
 
     // Re-project the pre-parsed holdings under a candidate withdrawal. Each probe
     // opens a fresh session — cheap next to the month loop — and skips the series
     // rounding and per-row assembly a full `CalcOutput` would carry.
     let run_with = |w: Decimal| -> Result<Run, CalcError> {
-        let mut session = open_if_ordered(&input.tax, strategy, true)?;
-        project(&prepared, horizon_months, drawdown_months, w, strategy, &groups, rate_cap, &mut session, charging)
+        let mut plan = open_if_ordered(&input.tax, strategy, true)?;
+        project(&prepared, horizon_months, drawdown_months, w, strategy, &groups, rate_cap, &mut plan)
     };
     // A draw is feasible if it survives the whole drawdown period without the
     // portfolio ever hitting £0.
@@ -341,9 +339,8 @@ fn solve_time_to_deplete(input: &CalcInput) -> Result<Solution, CalcError> {
     let rate_cap = rate_cap_of(strategy)?;
     let prepared = prepare_for(input)?;
     let groups = groups_for(strategy, &prepared);
-    let charging = input.tax.as_ref().is_some_and(|t| t.system.has_periodic_charge());
-    let mut session = open_if_ordered(&input.tax, strategy, true)?;
-    let out = project(&prepared, horizon_months, span, withdrawal, strategy, &groups, rate_cap, &mut session, charging)?;
+    let mut plan = open_if_ordered(&input.tax, strategy, true)?;
+    let out = project(&prepared, horizon_months, span, withdrawal, strategy, &groups, rate_cap, &mut plan)?;
 
     Ok(match out.depletion_month {
         Some(m) => Solution::Depletes(m - horizon_months),
