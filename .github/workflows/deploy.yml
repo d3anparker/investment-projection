@@ -37,14 +37,19 @@ jobs:
       - run: cargo test --workspace --features taxkit/mock
       # The jurisdiction boundary is the crates' central invariant and is
       # otherwise protected only by someone remembering to run these by hand.
-      # `taxkit` must name no country (mock.rs is a fictional one, on purpose)
-      # and `calc` must never reach `uk-tax`.
+      # `taxkit` must name no country (mock.rs is a fictional one, on purpose),
+      # `calc` must reach neither jurisdiction crate, and outside its own
+      # `jurisdiction/` module `app` must name neither either.
       - name: taxkit names no jurisdiction
         run: |
-          ! grep -rniE "isa|sipp|pension|hmrc|scotland|england|£|gbp" taxkit/src \
+          ! grep -rniE "isa|sipp|pension|hmrc|scotland|england|£|gbp|abgeltung|kirchensteuer|rürup|riester|bundesland|freibetrag|€|eur" taxkit/src \
             --include=*.rs | grep -v "^taxkit/src/mock.rs"
-      - name: calc does not depend on uk-tax
-        run: "! cargo tree -p calc | grep -q uk-tax"
+      - name: calc depends on no jurisdiction crate
+        run: |
+          ! cargo tree -p calc | grep -qiE "uk-tax|de-tax"
+      - name: app names a jurisdiction only inside jurisdiction/
+        run: |
+          ! grep -rn "uk_tax\|de_tax" app/src --include=*.rs | grep -v "^app/src/jurisdiction/"
 
   # Headless-browser suite for the App component and its children
   # (app/tests/ui.rs). ubuntu-latest ships Firefox + geckodriver already, so we
