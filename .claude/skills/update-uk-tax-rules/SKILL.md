@@ -1,6 +1,6 @@
 ---
-name: update-tax-rules
-description: Refresh the UK tax figures in the uk-tax crate — rates, thresholds, allowances, the account catalogue — against current published sources, and stamp them with today's date. Use when asked to update the tax rules, the tax year, the tax tables, the uk-tax crate, or the rates/allowances a drawdown projection uses; or when the app is showing a stale-figures warning.
+name: update-uk-tax-rules
+description: Refresh the United Kingdom tax figures in the uk-tax crate — rates, thresholds, allowances, the account catalogue — against current published sources, and stamp them with today's date. Use when asked to update the UK tax rules, the UK tax year, the uk-tax crate, or the rates a UK drawdown projection uses; or when the app shows a stale-figures warning under the United Kingdom. For Germany, use update-german-tax-rules instead.
 ---
 
 # Updating the UK tax rules

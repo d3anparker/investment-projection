@@ -32,7 +32,8 @@ system light/dark preference.
 
 Money should not be calculated in binary floating point (where `0.1 + 0.2`
 famously isn't `0.3`). This app is written **entirely in Rust**, compiled to
-**WebAssembly**, as a Cargo workspace of two crates:
+**WebAssembly**, as a Cargo workspace of five crates — two for the projection,
+three for the tax model:
 
 - [`calc/`](calc/src/lib.rs) — a **pure library** that does every financial
   calculation in exact base-10 decimals (`rust_decimal`). No UI, no WASM
@@ -43,9 +44,16 @@ famously isn't `0.3`). This app is written **entirely in Rust**, compiled to
   that owns the reactive form and *formats* the `Decimal`s `calc` returns. It
   calls `calc::calculate()` directly with shared types and performs no
   arithmetic of its own.
+- [`taxkit/`](taxkit/src/lib.rs) — the jurisdiction-neutral contract a tax
+  system implements (`TaxSystem`/`TaxSession`), naming no country, currency or
+  account type.
+- [`uk-tax/`](uk-tax/src/lib.rs) and [`de-tax/`](de-tax/src/lib.rs) — the United
+  Kingdom and Germany, one crate each, picked at runtime by a jurisdiction
+  switch in the UI. `calc` depends on neither; it only ever sees the neutral
+  traits.
 
 The workspace root is a *virtual* manifest (`[workspace]` only, no package), so
-both crates are named peers.
+the crates are named peers.
 
 Because both layers are Rust, there is no JS↔WASM string boundary and no
 JavaScript to keep in sync — the UI and the core share the same types. Nothing
@@ -95,11 +103,17 @@ Tax figures always carry the rules they were worked out under and the date those
 were last checked. If the rules look out of date, you get a warning — but the
 projection still runs.
 
-**None of this is tax or financial advice.** The tax model is a simplification:
-it covers income tax across all four UK jurisdictions (including the withdrawn
-personal allowance), capital gains, and phased tax-free pension cash. It does not
-model dividend or savings income, capital losses, investment bonds, inheritance
-tax, or the timing of the state pension.
+**None of this is tax or financial advice.** The tax model is a simplification.
+For the **United Kingdom** it covers income tax across all four jurisdictions
+(including the withdrawn personal allowance), capital gains, and phased tax-free
+pension cash; it does not model dividend or savings income, capital losses,
+investment bonds, inheritance tax, or the timing of the state pension. For
+**Germany** it covers the §32a income-tax tariff with the Solidaritätszuschlag
+and Kirchensteuer, the flat Abgeltungsteuer with the Sparer-Pauschbetrag and fund
+Teilfreistellung, the Vorabpauschale, joint assessment, and the cohort-fixed
+pension taxable share; it does not model social contributions on pensions,
+capital-loss buckets, a true annual Günstigerprüfung, or the Vorabpauschale's
+realised-gain cap during drawdown.
 ## Deploying (GitHub Pages)
 
 Every push to `main` publishes the site to GitHub Pages via
