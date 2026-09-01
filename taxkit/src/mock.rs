@@ -265,6 +265,7 @@ mod tests {
             other_income: d(other_income),
             age: Some(60),
             uprate: Decimal::ZERO,
+            ..Default::default()
         })
         .unwrap()
     }
@@ -346,6 +347,7 @@ mod tests {
                 other_income: Decimal::ZERO,
                 age: Some(40),
                 uprate: Decimal::ZERO,
+                ..Default::default()
             })
             .unwrap();
         let err = s
@@ -362,6 +364,7 @@ mod tests {
                 other_income: Decimal::ZERO,
                 age: None,
                 uprate: Decimal::ZERO,
+                ..Default::default()
             })
             .err()
             .expect("this should be refused")

@@ -93,7 +93,7 @@ pub(crate) fn open_session(tax: &TaxContext) -> Result<Box<dyn TaxSession>, Calc
     }
 
     tax.system
-        .open(&SessionSpec { region: tax.region.clone(), other_income, age, uprate })
+        .open(&SessionSpec { region: tax.region.clone(), other_income, age, uprate, ..Default::default() })
         .map_err(|e| tax_error(e, None))
 }
 

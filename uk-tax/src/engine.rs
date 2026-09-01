@@ -608,6 +608,7 @@ mod tests {
             other_income: d(other_income),
             age,
             uprate: Decimal::ZERO,
+            ..Default::default()
         })
         .unwrap()
     }
@@ -870,6 +871,7 @@ mod tests {
                 other_income: Decimal::ZERO,
                 age: Some(60),
                 uprate: d("0.1"),
+                ..Default::default()
                 })
             .unwrap();
         let p = pot(ids::DEFINED_BENEFIT, "1000000", "0");
@@ -931,6 +933,7 @@ mod tests {
                 other_income: Decimal::ZERO,
                 age: None,
                 uprate: Decimal::ZERO,
+                ..Default::default()
             })
             .err()
             .expect("this should be refused")
@@ -943,6 +946,7 @@ mod tests {
                 other_income: d("-1"),
                 age: None,
                 uprate: Decimal::ZERO,
+                ..Default::default()
             })
             .err()
             .expect("this should be refused")
