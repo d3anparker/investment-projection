@@ -9,7 +9,7 @@ leptos = { version = "0.6", features = ["csr"] }
 calc = { path = "../calc" }
 taxkit = { path = "../taxkit" }
 # The one line that names a jurisdiction; see `convert::TAX_SYSTEM`.
-uktax = { path = "../uktax" }
+uk-tax = { path = "../uk-tax" }
 rust_decimal = { version = "1", features = ["maths"] }
 console_error_panic_hook = "0.1"
 # The shareable link is a base64url-encoded JSON snapshot of the form state

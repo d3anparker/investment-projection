@@ -15,7 +15,7 @@
 //!
 //! ```no_run
 //! # use taxkit::TaxSystem;
-//! let system: &dyn TaxSystem = &uktax::UK;
+//! let system: &dyn TaxSystem = &uk_tax::UK;
 //! assert_eq!(system.label(), "United Kingdom");
 //! ```
 //!
