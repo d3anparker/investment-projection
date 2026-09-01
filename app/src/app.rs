@@ -147,6 +147,22 @@ pub fn App() -> impl IntoView {
         .and_then(|h| share::decode(&h))
         .unwrap_or_else(ShareState::example);
 
+    // Resolve the jurisdiction first and point `convert` at its tax system,
+    // *before* the rows and region below are seeded — they resolve account and
+    // region ids against the active catalogue. `jurisdiction` is a catalogue id;
+    // `active_sys` derives the live system reactively so every catalogue-driven
+    // control rebuilds when it changes.
+    let jurisdiction = create_rw_signal(
+        crate::jurisdiction::from_id(&state.jurisdiction).id.to_string(),
+    );
+    convert::set_active_system(crate::jurisdiction::system_from(&jurisdiction.get_untracked()));
+    let active_sys = move || crate::jurisdiction::system_from(&jurisdiction.get());
+    // The currency symbol, as a reactive context every figure reads through
+    // `format::currency`, so a jurisdiction switch re-renders them all.
+    provide_context(crate::format::ActiveCurrency(Signal::derive(move || {
+        active_sys().currency_symbol()
+    })));
+
     let rows = create_rw_signal(
         state
             .rows
@@ -176,6 +192,7 @@ pub fn App() -> impl IntoView {
     let other_income = create_rw_signal(state.other_income);
     let age = create_rw_signal(state.age);
     let uprate = create_rw_signal(state.uprate);
+    let options = create_rw_signal(state.options);
     // Asked of the resolver rather than tested against the raw string:
     // `strategy_from` maps anything it does not recognise to pro-rata (so an old
     // link still opens), and a second predicate spelling that rule out by hand
@@ -222,6 +239,8 @@ pub fn App() -> impl IntoView {
         other_income: other_income.get(),
         age: age.get(),
         uprate: uprate.get(),
+        jurisdiction: jurisdiction.get(),
+        options: options.with(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
     };
     let build_current = move || build_input(&form_snapshot());
 
@@ -391,9 +410,8 @@ pub fn App() -> impl IntoView {
             other_income: other_income.get(),
             age: age.get(),
             uprate: uprate.get(),
-            // No jurisdiction control emits options yet (Phase C wires the picker
-            // and its panels); an empty map round-trips unchanged.
-            options: Default::default(),
+            options: options.get(),
+            jurisdiction: jurisdiction.get(),
         };
         // Write the fragment with replace_state so the shared link doesn't pile
         // up Back-button history entries. The status is set inside (address-bar
@@ -452,6 +470,22 @@ pub fn App() -> impl IntoView {
                                on:change=move |_| plan_kind.set("drawdown".to_string()) />
                         <label for="mode-drawdown">"Drawing it down"</label>
                     </div>
+                    // The jurisdiction picker: a static option set (the fixed
+                    // catalogue), so it never falls foul of the swap-reset trap.
+                    // Hidden entirely when only one jurisdiction is compiled in,
+                    // the same courtesy the region select gets.
+                    {(crate::jurisdiction::JURISDICTIONS.len() > 1).then(|| view! {
+                        <label class="jurisdiction-pick">
+                            <span>"Taxed in"</span>
+                            <select on:change=move |ev| jurisdiction.set(event_target_value(&ev))>
+                                {crate::jurisdiction::JURISDICTIONS.iter().map(|j| view! {
+                                    <option value=j.id selected=move || jurisdiction.get() == j.id>
+                                        {j.label}
+                                    </option>
+                                }).collect_view()}
+                            </select>
+                        </label>
+                    })}
                 </fieldset>
 
                 <section class="panel panel-summary" aria-labelledby="projection-h">
@@ -558,22 +592,24 @@ pub fn App() -> impl IntoView {
                                 // like it matters is worse than no control — it
                                 // also keeps the aligned four-field row exactly
                                 // as it was before accounts existed.
-                                {move || is_drawdown().then(|| view! {
+                                {move || (is_drawdown()).then(|| {
+                                    // Reading `jurisdiction` here rebuilds the whole
+                                    // `<select>` node when the jurisdiction changes, so its
+                                    // option set never *swaps* under a persistent control
+                                    // (which the browser would reset). Options come from the
+                                    // active catalogue, and `selected=` (not `prop:value`)
+                                    // drives it, since a select's props are set before its
+                                    // options exist.
+                                    let kinds = active_sys().account_kinds();
+                                    view! {
                                     <label class="fld fld-account">
                                         <span class="fld-lbl">"Account"</span>
-                                        // Built from the tax system's catalogue, never from
-                                        // a hard-coded list, and driven by `selected=` rather
-                                        // than `prop:value` — a select's props are set before
-                                        // its options exist, so a seeded non-default value
-                                        // silently falls back to the first entry. The option
-                                        // set is static: swapping options reactively makes
-                                        // the browser reset the control.
                                         <select
                                             aria-invalid=move || invalid_attrs(account_bad.get()).0
                                             aria-describedby=move || invalid_attrs(account_bad.get()).1
                                             class:field-invalid=move || account_bad.get()
                                             on:change=move |ev| r.account_kind.set(event_target_value(&ev))>
-                                            {convert::TAX_SYSTEM.account_kinds().iter().map(|k| view! {
+                                            {kinds.iter().map(|k| view! {
                                                 <option
                                                     value=k.id
                                                     title=k.note
@@ -583,12 +619,13 @@ pub fn App() -> impl IntoView {
                                             }).collect_view()}
                                         </select>
                                     </label>
+                                    }
                                 })}
                                 // Only for kinds that are taxed on the gain, and asked
                                 // of the catalogue rather than matched against a named
                                 // wrapper — so no jurisdiction leaks into the markup.
                                 {move || {
-                                    let needs = convert::TAX_SYSTEM
+                                    let needs = active_sys()
                                         .account_kind(&r.account_kind.get())
                                         .is_some_and(|k| k.needs_cost_basis);
                                     (needs && is_drawdown()).then(|| {
@@ -716,7 +753,10 @@ pub fn App() -> impl IntoView {
                         let income_ref = bind_value(other_income);
                         let age_ref = bind_value(age);
                         let uprate_ref = bind_value(uprate);
-                        let regions = convert::TAX_SYSTEM.regions();
+                        // Reading the active system here rebuilds the whole tax
+                        // fieldset (regions, and the jurisdiction's own panel
+                        // below) when the jurisdiction changes.
+                        let regions = active_sys().regions();
                         view! {
                         <fieldset class="tax-settings">
                             <legend>"How to take it"</legend>
@@ -777,6 +817,16 @@ pub fn App() -> impl IntoView {
                                 </div>
                                 {adorned_field("uprate", "Tax thresholds rise", "pct", "0",
                                     "a year", uprate_ref, uprate, uprate_bad)}
+                                // The active jurisdiction's own bespoke controls,
+                                // if it has any. Rendered here inside the rebuilt
+                                // fieldset (so it follows the jurisdiction), and
+                                // nothing at all for a jurisdiction with no panel.
+                                {crate::jurisdiction::from_id(&jurisdiction.get())
+                                    .settings_panel
+                                    .map(|panel| panel(crate::jurisdiction::SettingsSlot {
+                                        options,
+                                        today_year: today.get_value().year,
+                                    }))}
                             })}
                         </fieldset>
                         }
@@ -865,8 +915,8 @@ pub fn App() -> impl IntoView {
                         {move || outcome.with(|o| {
                             o.result.as_ref().ok().and_then(|out| {
                                 let (label, checked) = (out.rules_label?, out.rules_as_of?);
-                                let line = freshness::as_of_line(convert::TAX_SYSTEM, label, checked);
-                                let stale = freshness::stale_note(convert::TAX_SYSTEM, today.get_value());
+                                let line = freshness::as_of_line(convert::active_system(), label, checked);
+                                let stale = freshness::stale_note(convert::active_system(), today.get_value());
                                 Some(view! {
                                     <p class="tax-asof">{line}</p>
                                     // `role="note"`, never `role="alert"`: this is
@@ -879,6 +929,10 @@ pub fn App() -> impl IntoView {
                                 })
                             })
                         })}
+                        // The active jurisdiction's own figure notes, if any.
+                        {move || crate::jurisdiction::from_id(&jurisdiction.get())
+                            .notes_panel
+                            .map(|panel| panel(crate::jurisdiction::NotesSlot))}
                     </section>
                 })}
             </main>

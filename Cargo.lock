@@ -35,6 +35,7 @@ dependencies = [
  "base64",
  "calc",
  "console_error_panic_hook",
+ "de-tax",
  "js-sys",
  "leptos",
  "rust_decimal",

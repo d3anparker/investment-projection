@@ -23,7 +23,7 @@
 use calc::{calculate, CalcInput, CalcOutput, Limit, Order, Plan, Strategy};
 use leptos::*;
 
-use crate::convert::{StrategyChoice, TAX_SYSTEM};
+use crate::convert::{active_system, StrategyChoice};
 use crate::format::{fmt_money, month_label};
 
 /// One strategy's outcome, reduced to the figures the table shows.
@@ -105,7 +105,7 @@ fn strategy_label(strategy: &Strategy) -> String {
 fn conventional_label(order: &[String]) -> String {
     let names: Vec<&str> = order
         .iter()
-        .filter_map(|id| TAX_SYSTEM.account_kind(id))
+        .filter_map(|id| active_system().account_kind(id))
         .map(|k| k.short_label)
         .collect();
     match names.len() {
@@ -378,7 +378,7 @@ mod tests {
     fn a_short_order_names_its_accounts_from_the_catalogue() {
         // Never written out: the accounts named have to be ones the tax system
         // actually advertises, or the label would drift from the behaviour.
-        let ids: Vec<String> = TAX_SYSTEM
+        let ids: Vec<String> = active_system()
             .account_kinds()
             .iter()
             .take(2)
@@ -386,7 +386,7 @@ mod tests {
             .collect();
         let label = conventional_label(&ids);
         for id in &ids {
-            let k = TAX_SYSTEM.account_kind(id).expect("taken from the catalogue");
+            let k = active_system().account_kind(id).expect("taken from the catalogue");
             assert!(label.contains(k.short_label), "{label}");
         }
     }
@@ -395,7 +395,7 @@ mod tests {
     fn a_long_order_falls_back_rather_than_naming_the_first_two() {
         // Truncating a dozen accounts to two reads as though those two were the
         // point, which is more misleading than not naming any.
-        let all: Vec<String> = TAX_SYSTEM
+        let all: Vec<String> = active_system()
             .conventional_order()
             .iter()
             .map(|s| (*s).to_string())

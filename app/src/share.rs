@@ -68,6 +68,11 @@ pub struct ShareState {
     /// without a `VERSION` bump: an older link decodes it empty.
     #[serde(default)]
     pub options: std::collections::BTreeMap<String, String>,
+    /// Which jurisdiction's tax system to project under, as a jurisdiction id.
+    /// Blank decodes to the default jurisdiction, so every existing link keeps
+    /// working; hence no `VERSION` bump.
+    #[serde(default)]
+    pub jurisdiction: String,
 }
 
 fn default_horizon_value() -> String {
@@ -110,10 +115,10 @@ impl ShareState {
         // The example names accounts through the tax system's catalogue rather
         // than hard-coding ids, so it keeps working if the catalogue changes and
         // needs no edit at all if the whole system is swapped.
-        let kinds = crate::convert::TAX_SYSTEM.account_kinds();
+        let kinds = crate::convert::active_system().account_kinds();
         // The kind a blank picker resolves to: the system's own default, asked
         // for rather than presumed to be the first entry.
-        let first = crate::convert::TAX_SYSTEM
+        let first = crate::convert::active_system()
             .default_account_kind()
             .map_or("", |k| k.id);
         let taxable = kinds
@@ -140,6 +145,7 @@ impl ShareState {
             age: String::new(),
             uprate: String::new(),
             options: std::collections::BTreeMap::new(),
+            jurisdiction: String::new(),
         }
     }
 }
@@ -246,6 +252,7 @@ mod tests {
             age: "60".into(),
             uprate: "2".into(),
             options: [("joint".to_string(), "true".to_string())].into_iter().collect(),
+            jurisdiction: "de".into(),
         }
     }
 

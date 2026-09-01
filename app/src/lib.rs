@@ -29,6 +29,7 @@ pub mod convert;
 pub mod format;
 pub mod freshness;
 pub mod goal;
+pub mod jurisdiction;
 pub mod model;
 pub mod outcome;
 pub mod panel;

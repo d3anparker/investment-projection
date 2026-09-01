@@ -105,8 +105,11 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
         view! {
             <p class="depletion-note" role="note">
                 <strong>{format!("Your money runs out in {}.", month_label(m))}</strong>
-                " Drawing it down empties the portfolio before the drawdown period ends; \
-                 after that point the value stays at \u{00a3}0."
+                {format!(
+                    " Drawing it down empties the portfolio before the drawdown period ends; \
+                     after that point the value stays at {}0.",
+                    crate::format::currency(),
+                )}
             </p>
         }
     });
