@@ -1,0 +1,9 @@
+[package]
+name = "de-tax"
+version = "0.1.0"
+edition = "2021"
+description = "Germany tax rules and withdrawal taxation, implementing the taxkit traits"
+
+[dependencies]
+rust_decimal = { version = "1", features = ["maths"] }
+taxkit = { path = "../taxkit" }
