@@ -63,7 +63,7 @@ const STALE_AFTER_MONTHS: i32 = 18;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UkTaxSystem;
 
-/// The instance to wire in: `&uktax::UK`.
+/// The instance to wire in: `&uk_tax::UK`.
 pub static UK: UkTaxSystem = UkTaxSystem;
 
 const REGIONS: &[Region] = &[

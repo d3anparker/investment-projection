@@ -81,7 +81,7 @@ use crate::types::NEUTRAL_CURRENCY;
 
     /// A tax context over the mock system: a fictional jurisdiction with round
     /// numbers, so these tests pin the *engine* rather than one country's
-    /// figures. A rate change in `uktax` must not be able to break `calc`.
+    /// figures. A rate change in `uk-tax` must not be able to break `calc`.
     fn taxed(other_income: &str, age: &str) -> TaxContext {
         TaxContext {
             system: &taxkit::mock::MOCK,
@@ -676,7 +676,7 @@ use crate::types::NEUTRAL_CURRENCY;
     //
     // These run against `taxkit`'s mock system, not against any real
     // jurisdiction. That is deliberate: it pins the *engine*, so a rate change
-    // in `uktax` next April cannot break `calc`, and it is the second
+    // in `uk-tax` next April cannot break `calc`, and it is the second
     // implementation that proves nothing jurisdiction-specific leaked in here.
 
     use taxkit::mock::{FREE, GAINS, INCOME};

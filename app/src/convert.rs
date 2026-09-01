@@ -20,7 +20,7 @@ use calc::{CalcInput, InvestmentInput, Plan, Strategy, TaxContext, Unit};
 /// **The only place the app names a jurisdiction.** Every control that mentions
 /// an account, a region or a currency is populated from this, so swapping the
 /// line swaps the whole tax model and nothing else in `app` changes.
-pub const TAX_SYSTEM: &dyn taxkit::TaxSystem = &uktax::UK;
+pub const TAX_SYSTEM: &dyn taxkit::TaxSystem = &uk_tax::UK;
 
 /// A plain-string snapshot of one editor row, decoupled from the reactive
 /// `Row`'s signals so the input-building logic can be tested without a runtime.

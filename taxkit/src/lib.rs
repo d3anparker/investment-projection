@@ -4,7 +4,7 @@
 //! Nothing in this crate names a country, a currency, an account type or an
 //! allowance. If a reviewer can tell which jurisdiction it is for, it is wrong.
 //! A tax system is a [`TaxSystem`] implementation living in its own crate (see
-//! the `uktax` crate); the projection engine (`calc`) and the UI (`app`) are
+//! the `uk-tax` crate); the projection engine (`calc`) and the UI (`app`) are
 //! written against these traits and never against a concrete one.
 //!
 //! # The shape of the contract

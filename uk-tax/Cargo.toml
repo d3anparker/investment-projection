@@ -1,5 +1,5 @@
 [package]
-name = "uktax"
+name = "uk-tax"
 version = "0.1.0"
 edition = "2021"
 description = "United Kingdom tax rules and withdrawal taxation, implementing the taxkit traits"

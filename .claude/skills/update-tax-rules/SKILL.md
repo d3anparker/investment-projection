@@ -1,17 +1,17 @@
 ---
 name: update-tax-rules
-description: Refresh the UK tax figures in the uktax crate — rates, thresholds, allowances, the account catalogue — against current published sources, and stamp them with today's date. Use when asked to update the tax rules, the tax year, the tax tables, the uktax crate, or the rates/allowances a drawdown projection uses; or when the app is showing a stale-figures warning.
+description: Refresh the UK tax figures in the uk-tax crate — rates, thresholds, allowances, the account catalogue — against current published sources, and stamp them with today's date. Use when asked to update the tax rules, the tax year, the tax tables, the uk-tax crate, or the rates/allowances a drawdown projection uses; or when the app is showing a stale-figures warning.
 ---
 
 # Updating the UK tax rules
 
 ## What you are editing, and what you are not
 
-`uktax/src/tables.rs` is **data**: every threshold is a whole number of pounds
+`uk-tax/src/tables.rs` is **data**: every threshold is a whole number of pounds
 (`i64`), every rate is basis points (`u32`). A rate update is a change of integer
 literals and nothing else.
 
-`uktax/src/engine.rs` is **mechanism**: how those figures become a rate schedule
+`uk-tax/src/engine.rs` is **mechanism**: how those figures become a rate schedule
 and how a withdrawal is priced against it. **Do not edit it as part of a routine
 update.** If a change needs it, that is a decision for the user, not something to
 implement unprompted — report it and stop (see step 5).
@@ -29,7 +29,7 @@ to 5 April, so 5 April and 6 April are in *different* years. Then read the
 current state:
 
 ```bash
-grep -n "label:\|as_of:\|source_note:" uktax/src/tables.rs
+grep -n "label:\|as_of:\|source_note:" uk-tax/src/tables.rs
 ```
 
 If `LATEST.label` already names the current tax year and `as_of` is recent, say
@@ -108,7 +108,7 @@ Every command goes through Docker. Start with the tax crates, which is where a
 bad table shows up:
 
 ```bash
-docker run --rm -v "${PWD}:/repo" -v ip-target:/target -v ip-cargo:/usr/local/cargo/registry -w /repo rust:1-slim cargo test -p taxkit -p uktax --features taxkit/mock --target-dir /target
+docker run --rm -v "${PWD}:/repo" -v ip-target:/target -v ip-cargo:/usr/local/cargo/registry -w /repo rust:1-slim cargo test -p taxkit -p uk-tax --features taxkit/mock --target-dir /target
 ```
 
 Then the whole workspace, to be sure nothing downstream shifted:
@@ -117,7 +117,7 @@ Then the whole workspace, to be sure nothing downstream shifted:
 docker run --rm -v "${PWD}:/repo" -v ip-target:/target -v ip-cargo:/usr/local/cargo/registry -w /repo rust:1-slim cargo test --workspace --features taxkit/mock --target-dir /target
 ```
 
-`uktax`'s tests check the tables are internally consistent — bands ascending from
+`uk-tax`'s tests check the tables are internally consistent — bands ascending from
 zero, no rate at or above 100%, the taper exactly exhausting the allowance,
 `TAX_YEARS` newest-first, every account having exactly one treatment and one
 place in the order. A failure there is usually a transcription error, not a
