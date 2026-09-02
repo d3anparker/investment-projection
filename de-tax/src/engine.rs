@@ -119,6 +119,10 @@ impl TaxSystem for GermanTaxSystem {
         tables::LATEST.source_note
     }
 
+    fn glossary(&self) -> &'static [taxkit::GlossaryEntry] {
+        crate::glossary::DE_GLOSSARY
+    }
+
     fn staleness(&self, today: SimpleDate) -> Staleness {
         let checked = tables::LATEST.as_of;
         let now = de_tax_year_of(today);

@@ -114,6 +114,10 @@ impl TaxSystem for UkTaxSystem {
         tables::LATEST.source_note
     }
 
+    fn glossary(&self) -> &'static [taxkit::GlossaryEntry] {
+        crate::glossary::UK_GLOSSARY
+    }
+
     fn staleness(&self, today: SimpleDate) -> Staleness {
         let checked = tables::LATEST.as_of;
         let now = uk_tax_year_of(today);
