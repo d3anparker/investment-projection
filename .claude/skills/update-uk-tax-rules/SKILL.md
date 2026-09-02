@@ -16,6 +16,20 @@ and how a withdrawal is priced against it. **Do not edit it as part of a routine
 update.** If a change needs it, that is a decision for the user, not something to
 implement unprompted — report it and stop (see step 5).
 
+`uk-tax/src/glossary.rs` is **data too, and in scope** — the terms the UI shows
+a reader, and what they mean. It lives beside the rules precisely so an update
+re-reads it: after changing a figure, check that the entry describing that rule
+still describes it. Two standing rules there, both easy to break by accident:
+
+- **No rates and no thresholds in a definition.** Figures live in `tables.rs`;
+  a definition that quotes one is a second place to update and a silent way to
+  go stale. Name the allowance, do not price it.
+- **Descriptive, never advisory.** Say what a rule does and which figure it
+  moves — never what a reader should do about it.
+
+Adding an account kind means adding its glossary entry, with the entry's `id`
+equal to the kind's; a coverage test fails otherwise.
+
 Everything else in the repo is off-limits here. `calc` and `app` are written
 against the `taxkit` traits and never name a jurisdiction; if an update seems to
 need a change there, something has gone wrong.

@@ -1017,6 +1017,38 @@ async fn switching_jurisdiction_swaps_the_glossary() {
     close_glossary(&root);
 }
 
+#[wasm_bindgen_test]
+async fn the_filter_narrows_the_list_and_says_when_it_matches_nothing() {
+    let root = harness::mount_with(&de_state(vec![row("Depot", "100000", "5", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&root);
+    let all = harness::qa(&root, ".glossary-body .gloss-item").len();
+    assert!(all > 20, "expected the whole list to start with: {all}");
+
+    let box_ = harness::q(&root, ".glossary-filter input")
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .unwrap();
+    harness::type_into(&box_, "vorabpauschale").await;
+    let narrowed = harness::qa(&root, ".glossary-body .gloss-item").len();
+    assert!(narrowed > 0 && narrowed < all, "filtered to {narrowed} of {all}");
+    assert!(
+        harness::q_opt(&root, ".glossary-body .gloss-worked").is_none(),
+        "the worked example is not a term and should not sit among the matches"
+    );
+
+    harness::type_into(&box_, "zzzznotaterm").await;
+    assert!(
+        harness::any_text(&root, ".glossary-empty", "No terms match"),
+        "an empty panel would read as a broken one"
+    );
+
+    // Reopening clears the filter — a stale one looks like a half-empty glossary.
+    close_glossary(&root);
+    open_glossary(&root);
+    assert_eq!(harness::qa(&root, ".glossary-body .gloss-item").len(), all);
+    close_glossary(&root);
+}
+
 /// The projected panel: a jurisdiction may insert content the flat term list
 /// cannot express, and one that supplies none renders no wrapper element at all
 /// — the same courtesy the settings and notes panels already get.

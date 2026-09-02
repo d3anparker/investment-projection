@@ -16,7 +16,7 @@ gate. Tick the boxes as they land.
 | **G1** | The contract (`taxkit::GlossaryEntry`) and both jurisdictions' entries. No UI. | ☑ landed |
 | **G2** | The shared app terms, the modal, the button, the mobile-first styling. | ☑ landed |
 | **G3** | Content projection: a jurisdiction may insert its own panel into the modal. | ☑ landed |
-| **G4** | Filtering, docs, the two update skills, the CI guard. | ☐ |
+| **G4** | Filtering, docs, the two update skills, the CI guard. | ☑ landed |
 
 ---
 
@@ -274,6 +274,28 @@ docker run --rm -v "${PWD}:/repo" -v ip-target:/target -v ip-cargo:/usr/local/ca
 Under Git Bash these need the `MSYS_NO_PATHCONV=1` prefix.
 
 ---
+
+## What landed, and what a later author should know
+
+All four phases are in. Two things worth recording because they are not
+obvious from the diff:
+
+- **No new CI guard was needed.** G4 planned for one and the four existing
+  greps turned out to cover it: the terms live in the tax crates, so `app`
+  still names no jurisdiction; `taxkit` gained a type and not a word; and a
+  native test in `app/src/glossary.rs` covers the one thing grep could not —
+  that the app's own entries print no currency symbol, the symbol being
+  reactive and a literal being the thing that would go stale.
+- **`\u{2014}`, not `--`, in a user-facing string.** The tax crates use `--`
+  freely in *doc comments*, which is house style, and it is easy to carry that
+  habit into a `definition` — where it renders as two hyphens on screen beside
+  the em dashes the rest of the UI uses. Same for quotation marks: `\u{201c}`
+  and `\u{201d}`, not `'`.
+
+Left undone deliberately: nothing from the plan. The obvious next additions,
+if the glossary is extended, are a per-entry deep link (which needs a scheme
+that does **not** touch the location fragment — see the note in `term_of`) and
+richer projected panels for a third jurisdiction.
 
 ## Who wrote what
 
