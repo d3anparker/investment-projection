@@ -38,6 +38,7 @@
 #![forbid(unsafe_code)]
 
 pub mod engine;
+pub mod glossary;
 pub mod tables;
 
 pub use engine::{UkTaxSystem, UK};

@@ -41,6 +41,7 @@
 #![forbid(unsafe_code)]
 
 pub mod engine;
+pub mod glossary;
 pub mod tables;
 pub mod tarif;
 

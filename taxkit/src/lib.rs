@@ -137,6 +137,44 @@ pub struct Region {
     pub label: &'static str,
 }
 
+/// One term a reader meets in this system's labels, notes and figures, and what
+/// it means.
+///
+/// The contract names the *shape* of an explanation and never the words. Every
+/// term, definition and grouping label is written by the implementation, in its
+/// own vocabulary, exactly as [`AccountKind::note`] and
+/// [`TaxSystem::source_note`] already are. A consumer renders what it is handed
+/// and learns nothing about the system from doing so.
+///
+/// Entries are plain data so they can be checked natively, without a UI: that a
+/// term is explained at all is a property of the *implementation*, testable
+/// alongside its rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlossaryEntry {
+    /// Stable, opaque id. Never parsed; a UI uses it for anchors and keys, and
+    /// a [`GlossaryEntry::see_also`] names one.
+    pub id: &'static str,
+    /// The term as it appears in the interface.
+    pub term: &'static str,
+    /// An abbreviation, alternative name or translation. May be empty.
+    pub also: &'static str,
+    /// What it means, in plain language. Descriptive, never advisory -- the
+    /// same rule [`AccountKind::note`] follows.
+    pub definition: &'static str,
+    /// Where the reader meets it: which card, column or figure this term
+    /// explains. May be empty for background terms.
+    ///
+    /// This is what makes a glossary answer "how do I read this number?"
+    /// rather than only "what does this word mean?", so it is load-bearing
+    /// rather than decorative.
+    pub seen_in: &'static str,
+    /// Grouping label, so a long list reads as sections. Entries sharing a
+    /// topic are expected to be adjacent.
+    pub topic: &'static str,
+    /// Ids of related entries, within this same glossary.
+    pub see_also: &'static [&'static str],
+}
+
 // --- drawing ----------------------------------------------------------------
 
 /// A holding, as the tax system sees it.
@@ -376,6 +414,22 @@ pub trait TaxSystem: Sync {
 
     /// Where the figures came from. Displayed, and read by the update skill.
     fn source_note(&self) -> &'static str;
+
+    /// Terms this system's own labels, notes and figures use, and what they
+    /// mean.
+    ///
+    /// Defaulted empty, so a system need not explain itself and the mock does
+    /// not have to invent words for a tax that does not exist. A system that
+    /// does supply entries returns them in presentation order, grouped by
+    /// [`GlossaryEntry::topic`] -- a consumer is expected to render the
+    /// grouping, not to compute one.
+    ///
+    /// Explaining the *projection* is not this method's job: a consumer's own
+    /// vocabulary is the consumer's to define. This is only the vocabulary the
+    /// system itself puts on screen.
+    fn glossary(&self) -> &'static [GlossaryEntry] {
+        &[]
+    }
 
     /// Whether these rules look out of date as at `today`.
     ///
