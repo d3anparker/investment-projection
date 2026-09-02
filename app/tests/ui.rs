@@ -897,6 +897,146 @@ async fn a_charging_system_keeps_its_tax_details_under_pro_rata() {
 }
 
 // =====================================================================
+// The glossary modal
+// =====================================================================
+
+/// Open the glossary and hand back the `<dialog>`.
+///
+/// The button is focused first: `showModal()` restores focus to whatever was
+/// focused when it opened, and a programmatic `.click()` does not focus a
+/// button on its own.
+fn open_glossary(root: &web_sys::Element) -> web_sys::Element {
+    let btn = harness::find_button(root, "Glossary");
+    btn.focus().unwrap();
+    harness::click(&btn);
+    harness::q(root, "dialog.glossary-dialog")
+}
+
+/// Every glossary test must close its dialog. A modal left open makes the rest
+/// of the page inert, and earlier mounts stay in the document for the whole
+/// run — so one leaked dialog would break every test after it.
+fn close_glossary(root: &web_sys::Element) {
+    harness::click(&harness::find_button(root, "Close"));
+}
+
+#[wasm_bindgen_test]
+async fn the_glossary_button_opens_a_modal_and_close_returns_focus() {
+    let root = harness::mount_with(&ShareState::example());
+    let btn = harness::find_button(&root, "Glossary");
+
+    let dialog = harness::q(&root, "dialog.glossary-dialog");
+    assert!(!dialog.has_attribute("open"), "the dialog starts closed");
+
+    btn.focus().unwrap();
+    harness::click(&btn);
+    assert!(dialog.has_attribute("open"), "clicking the button opens it");
+
+    close_glossary(&root);
+    assert!(!dialog.has_attribute("open"), "Close closes it");
+    assert_eq!(
+        harness::active_element().map(|e| harness::text_of(&e)),
+        Some("Glossary".to_string()),
+        "focus must come back to the trigger, not fall to the body"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn the_glossary_body_is_built_only_once_opened() {
+    let root = harness::mount_with(&ShareState::example());
+    assert_eq!(
+        harness::qa(&root, ".glossary-body .gloss-item").len(),
+        0,
+        "nothing should be rendered while the dialog is closed"
+    );
+
+    open_glossary(&root);
+    assert!(
+        !harness::qa(&root, ".glossary-body .gloss-item").is_empty(),
+        "opening it builds the entries"
+    );
+    close_glossary(&root);
+}
+
+#[wasm_bindgen_test]
+async fn the_glossary_explains_the_projection_under_every_jurisdiction() {
+    for state in [ShareState::example(), de_state(vec![row("Depot", "100000", "5", "0")], "cheapest")]
+    {
+        let root = harness::mount_with(&state);
+        harness::settle().await;
+        open_glossary(&root);
+        let body = harness::text(&root, ".glossary-body");
+        // The app's own vocabulary, which no tax system can explain.
+        assert!(body.contains("Handover"), "expected the app's terms: {body}");
+        assert!(body.contains("Deployed"));
+        assert!(body.contains("Why nothing is ranked"));
+        close_glossary(&root);
+    }
+}
+
+#[wasm_bindgen_test]
+async fn the_glossary_shows_the_active_jurisdictions_own_words() {
+    let uk = harness::mount_with(&taxed_state(vec![row("Fund", "10000", "7", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&uk);
+    let uk_body = harness::text(&uk, ".glossary-body");
+    assert!(uk_body.contains("ISA"), "expected UK terms: {uk_body}");
+    assert!(
+        !uk_body.contains("Vorabpauschale"),
+        "and none of Germany's: {uk_body}"
+    );
+    close_glossary(&uk);
+
+    let de = harness::mount_with(&de_state(vec![row("Depot", "100000", "5", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&de);
+    let de_body = harness::text(&de, ".glossary-body");
+    assert!(
+        de_body.contains("Vorabpauschale") && de_body.contains("Sparer-Pauschbetrag"),
+        "expected German terms: {de_body}"
+    );
+    close_glossary(&de);
+}
+
+#[wasm_bindgen_test]
+async fn switching_jurisdiction_swaps_the_glossary() {
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "10000", "7", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&root);
+    assert!(!harness::text(&root, ".glossary-body").contains("Vorabpauschale"));
+
+    let picker: web_sys::HtmlSelectElement = harness::q(&root, ".jurisdiction-pick select")
+        .dyn_into()
+        .unwrap();
+    picker.set_value("de");
+    harness::dispatch_change(&picker).await;
+
+    assert!(
+        harness::text(&root, ".glossary-body").contains("Vorabpauschale"),
+        "the open dialog must follow the jurisdiction"
+    );
+    close_glossary(&root);
+}
+
+/// Cross-references are text, never links. An `<a href="#...">` would overwrite
+/// the location fragment, and the fragment is where a shared link keeps the
+/// whole portfolio — one click and a reload would lose it.
+#[wasm_bindgen_test]
+async fn the_glossary_holds_no_fragment_links() {
+    let root = harness::mount_with(&de_state(vec![row("Depot", "100000", "5", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&root);
+
+    for a in harness::qa(&root, ".glossary-body a") {
+        let href = a.get_attribute("href").unwrap_or_default();
+        assert!(
+            !href.starts_with('#'),
+            "a fragment link would clobber the share link: {href}"
+        );
+    }
+    close_glossary(&root);
+}
+
+// =====================================================================
 // Harness
 // =====================================================================
 

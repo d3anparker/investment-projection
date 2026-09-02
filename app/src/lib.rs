@@ -28,6 +28,7 @@ pub mod chart;
 pub mod convert;
 pub mod format;
 pub mod freshness;
+pub mod glossary;
 pub mod goal;
 pub mod jurisdiction;
 pub mod model;
