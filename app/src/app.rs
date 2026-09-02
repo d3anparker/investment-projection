@@ -460,7 +460,13 @@ pub fn App() -> impl IntoView {
                  buy, sell, or hold any investment."
             </div>
 
-            <main class="layout">
+            // `--currency` carries the active symbol into the stylesheet, which
+            // is the one place that draws money without being able to ask the
+            // tax system: the `.adorn-money` input decorations are a CSS
+            // `::before`. Set here, reactively, so they follow a jurisdiction
+            // switch like every rendered figure does.
+            <main class="layout"
+                  style=move || format!("--currency: '{}'", crate::format::currency())>
                 // The top-level mode switch, full-width above the panels. A radio
                 // group (styled as a segmented control), not a tablist: the
                 // holdings editor is shared between modes and stays put, so there

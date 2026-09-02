@@ -497,10 +497,21 @@ fn taxed_state(rows: Vec<RowData>, strategy: &str) -> ShareState {
     s
 }
 
+/// The tax system these tests seed — the default jurisdiction, which is what
+/// `state_of`/`taxed_state` leave the `jurisdiction` field blank for.
+///
+/// Deliberately *not* `convert::active_system()`. That reads a thread-local set
+/// while a projection is built, so a helper calling it **before** a mount picks
+/// up whatever jurisdiction the previous test finished on — which made these
+/// tests quietly order-dependent once one of them switched to Germany.
+fn seeded_system() -> &'static dyn taxkit::TaxSystem {
+    app::jurisdiction::system_from(app::jurisdiction::default_id())
+}
+
 /// The account kinds the app is actually wired to, asked of the tax system so a
 /// test never hard-codes a jurisdiction's wrappers.
 fn kinds() -> &'static [taxkit::AccountKind] {
-    app::convert::active_system().account_kinds()
+    seeded_system().account_kinds()
 }
 
 #[wasm_bindgen_test]
@@ -698,7 +709,7 @@ async fn tax_figures_always_carry_the_rules_they_used() {
         harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
     let line = harness::text(&root, ".tax-asof");
     assert!(
-        line.contains(app::convert::active_system().rules_label()),
+        line.contains(seeded_system().rules_label()),
         "a tax figure without a date is one you cannot judge: {line}"
     );
 
@@ -794,6 +805,39 @@ async fn a_german_link_uses_euro_and_the_german_catalogue() {
         .map(|k| k.id.to_string())
         .collect();
     assert_eq!(values, expected, "the account select is the German catalogue");
+}
+
+/// The `--currency` custom property on `.layout`, which is what the stylesheet
+/// draws the input-box adornments from.
+fn adornment_symbol(root: &web_sys::Element) -> String {
+    let layout = harness::q(root, ".layout");
+    web_sys::window()
+        .unwrap()
+        .get_computed_style(&layout)
+        .unwrap()
+        .unwrap()
+        .get_property_value("--currency")
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('\'')
+        .to_string()
+}
+
+#[wasm_bindgen_test]
+async fn the_input_adornments_follow_the_jurisdiction() {
+    // The `£` in the money boxes used to live in the stylesheet, which cannot
+    // ask the tax system anything — so it stayed a pound while every figure
+    // around it switched to euro. It is now driven by `--currency`.
+    let root = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    harness::settle().await;
+    assert_eq!(adornment_symbol(&root), "\u{00a3}", "the UK boxes show a pound");
+
+    let pick = harness::q(&root, ".jurisdiction-pick select");
+    let sel: web_sys::HtmlSelectElement = pick.clone().dyn_into().unwrap();
+    sel.set_value("de");
+    harness::dispatch_change(&pick).await;
+    harness::settle().await;
+    assert_eq!(adornment_symbol(&root), "\u{20ac}", "and the German boxes a euro");
 }
 
 #[wasm_bindgen_test]
