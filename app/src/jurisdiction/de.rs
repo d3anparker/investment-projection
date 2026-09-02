@@ -11,7 +11,7 @@ use de_tax::engine::options as de_opts;
 
 use std::collections::BTreeMap;
 
-use super::{NotesSlot, SettingsSlot};
+use super::{GlossarySlot, NotesSlot, SettingsSlot};
 
 type Options = RwSignal<BTreeMap<String, String>>;
 
@@ -92,6 +92,61 @@ pub fn notes(_slot: NotesSlot) -> View {
                  realised-gain cap on the Vorabpauschale during drawdown. Not tax advice."
             </p>
         </div>
+    }
+    .into_view()
+}
+
+/// A worked Vorabpauschale, projected into the glossary modal.
+///
+/// The term list defines the word; this shows the arithmetic, which is the part
+/// a reader actually needs — the charge is the one figure in a German
+/// projection that appears while nothing is being withdrawn, and "advance
+/// lump-sum charge" does not explain where it came from.
+///
+/// Every figure here is a **written-in illustration**, not a projection value
+/// and not a table lookup: a slot may not compute, derive or round anything,
+/// and quoting the real Basiszins would put a yearly-changing rate in a second
+/// place to update. The round numbers are chosen so the steps can be followed.
+pub fn glossary(_slot: GlossarySlot) -> View {
+    view! {
+        <section class="gloss-worked">
+            <h4>"A worked example: the Vorabpauschale"</h4>
+            <p>
+                "Round illustrative figures, not this year\u{2019}s rates and not your \
+                 projection \u{2014} the point is the order of the steps."
+            </p>
+            <ol>
+                <li>
+                    "An equity fund is worth \u{20ac}50,000 on 1 January, and say the \
+                     year\u{2019}s Basiszins is 2%."
+                </li>
+                <li>
+                    "The Basisertrag is 70% of that rate on the opening value: \
+                     \u{20ac}50,000 \u{d7} 2% \u{d7} 70% = \u{20ac}700."
+                </li>
+                <li>
+                    "It is capped at what the fund actually gained. A fund that rose \
+                     \u{20ac}400 is charged on \u{20ac}400; a fund that fell is charged \
+                     nothing at all."
+                </li>
+                <li>
+                    "The Teilfreistellung exempts part of it \u{2014} for an equity fund, \
+                     30% \u{2014} leaving \u{20ac}490 of the \u{20ac}700 taxable."
+                </li>
+                <li>
+                    "That is set against the Sparer-Pauschbetrag first. Whatever is left \
+                     is charged at the flat Abgeltungsteuer rate, with Soli and any \
+                     Kirchensteuer on top."
+                </li>
+            </ol>
+            <p>
+                "Two consequences worth knowing. The charge is paid out of the holding \
+                 itself, so a German accumulation grows a little more slowly than the \
+                 return alone suggests. And because it uses the same yearly allowance a \
+                 withdrawal would, it can leave less of that allowance for later in the \
+                 same year."
+            </p>
+        </section>
     }
     .into_view()
 }

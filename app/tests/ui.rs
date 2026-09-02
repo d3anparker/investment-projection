@@ -1017,6 +1017,32 @@ async fn switching_jurisdiction_swaps_the_glossary() {
     close_glossary(&root);
 }
 
+/// The projected panel: a jurisdiction may insert content the flat term list
+/// cannot express, and one that supplies none renders no wrapper element at all
+/// — the same courtesy the settings and notes panels already get.
+#[wasm_bindgen_test]
+async fn a_jurisdiction_may_project_its_own_glossary_panel() {
+    let de = harness::mount_with(&de_state(vec![row("Depot", "100000", "5", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&de);
+    let worked = harness::q_opt(&de, ".glossary-body .gloss-worked");
+    assert!(worked.is_some(), "Germany projects a worked example");
+    assert!(
+        harness::text_of(&worked.unwrap()).contains("Vorabpauschale"),
+        "and it is the one the term list cannot show"
+    );
+    close_glossary(&de);
+
+    let uk = harness::mount_with(&taxed_state(vec![row("Fund", "10000", "7", "0")], "cheapest"));
+    harness::settle().await;
+    open_glossary(&uk);
+    assert!(
+        harness::q_opt(&uk, ".glossary-body .gloss-worked").is_none(),
+        "a jurisdiction with no panel must render no wrapper"
+    );
+    close_glossary(&uk);
+}
+
 /// Cross-references are text, never links. An `<a href="#...">` would overwrite
 /// the location fragment, and the fragment is where a shared link keeps the
 /// whole portfolio — one click and a reload would lose it.
