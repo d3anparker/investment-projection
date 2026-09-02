@@ -502,6 +502,11 @@ pub fn App() -> impl IntoView {
                             </select>
                         </label>
                     })}
+                    // The glossary. It explains both the mode switch beside it
+                    // and the jurisdiction's own vocabulary, so this band — the
+                    // one that sets the whole page's context — is where it
+                    // belongs, rather than buried in the footer.
+                    <crate::glossary::Glossary jurisdiction=Signal::derive(move || jurisdiction.get())/>
                 </fieldset>
 
                 <section class="panel panel-summary" aria-labelledby="projection-h">
