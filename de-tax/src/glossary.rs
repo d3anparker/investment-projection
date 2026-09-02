@@ -154,8 +154,8 @@ pub const DE_GLOSSARY: &[GlossaryEntry] = &[
         term: "Immobilie (direkt)",
         also: "Property held directly",
         definition: "Property owned outright rather than through a fund. Its own \
-                     rules -- the ten-year holding period, owner-occupation, \
-                     depreciation -- are not modelled, so it is carried untaxed.",
+                     rules \u{2014} the ten-year holding period, owner-occupation, \
+                     depreciation \u{2014} are not modelled, so it is carried untaxed.",
         seen_in: "The account column, and the note that says it is not modelled.",
         topic: topics::ACCOUNTS,
         see_also: &[ids::FONDS_IMMO],
@@ -181,7 +181,7 @@ pub const DE_GLOSSARY: &[GlossaryEntry] = &[
         also: "Saver's allowance",
         definition: "A slice of capital income charged at nothing each year. It \
                      resets yearly and cannot be carried forward, and the \
-                     Vorabpauschale draws on the same allowance -- so a charge \
+                     Vorabpauschale draws on the same allowance \u{2014} so a charge \
                      during accumulation can leave less of it for a withdrawal \
                      later in the same year.",
         seen_in: "The unclaimed-allowance column in the drawdown comparison.",
@@ -229,7 +229,7 @@ pub const DE_GLOSSARY: &[GlossaryEntry] = &[
         term: "Anschaffungskosten",
         also: "Cost, what the holding cost you",
         definition: "What you paid, as against what the holding is worth today. \
-                     The difference is the gain, and only the gain is charged -- \
+                     The difference is the gain, and only the gain is charged \u{2014} \
                      which is why this box appears only for the account kinds \
                      taxed that way.",
         seen_in: "The cost box beside the account picker.",
@@ -280,7 +280,7 @@ pub const DE_GLOSSARY: &[GlossaryEntry] = &[
         definition: "A further charge on the tax itself, for members of a \
                      church that levies it, at a rate that depends on the state. \
                      It is chosen here through the region picker, which conflates \
-                     the state with membership -- pick 'no church tax' if you are \
+                     the state with membership \u{2014} pick \u{201c}no church tax\u{201d} if you are \
                      not a member.",
         seen_in: "The region picker, and every tax figure.",
         topic: topics::INCOME,
@@ -303,7 +303,7 @@ pub const DE_GLOSSARY: &[GlossaryEntry] = &[
         id: "other_income",
         term: "Übrige steuerpflichtige Einkünfte",
         also: "Other taxable income",
-        definition: "Income you already expect to receive -- the state pension, \
+        definition: "Income you already expect to receive \u{2014} the state pension, \
                      rent, work. It is not part of the pot, but it is charged \
                      first, so withdrawals on top of it start further up the \
                      tariff.",

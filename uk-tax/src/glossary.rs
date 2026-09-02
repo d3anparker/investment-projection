@@ -60,7 +60,7 @@ pub const UK_GLOSSARY: &[GlossaryEntry] = &[
         also: "LISA",
         definition: "A tax-free wrapper with a government bonus on \
                      contributions and a withdrawal charge outside its intended \
-                     uses. The bonus and the charge are not modelled -- enter \
+                     uses. The bonus and the charge are not modelled \u{2014} enter \
                      what you expect to hold, and read withdrawals as \
                      qualifying ones.",
         seen_in: "The account column.",
@@ -225,7 +225,7 @@ pub const UK_GLOSSARY: &[GlossaryEntry] = &[
         id: "other_income",
         term: "Other taxable income",
         also: "",
-        definition: "Income you already expect to receive -- a defined benefit \
+        definition: "Income you already expect to receive \u{2014} a defined benefit \
                      pension, the state pension, rent, work. It is not part of \
                      the pot, but it fills the lower rate bands first, so \
                      withdrawals on top of it are charged at a higher rate.",
@@ -276,7 +276,7 @@ pub const UK_GLOSSARY: &[GlossaryEntry] = &[
         also: "Acquisition cost, base cost",
         definition: "What the holding cost you, as against what it is worth \
                      today. The difference is the gain, and only the gain is \
-                     charged -- which is why this box appears only for the \
+                     charged \u{2014} which is why this box appears only for the \
                      account kinds taxed that way.",
         seen_in: "The cost box beside the account picker.",
         topic: topics::GAINS,

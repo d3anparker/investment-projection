@@ -50,7 +50,9 @@ three for the tax model:
 - [`uk-tax/`](uk-tax/src/lib.rs) and [`de-tax/`](de-tax/src/lib.rs) — the United
   Kingdom and Germany, one crate each, picked at runtime by a jurisdiction
   switch in the UI. `calc` depends on neither; it only ever sees the neutral
-  traits.
+  traits. Each also carries its own **glossary** — every term it puts on screen
+  and what that term means — which the Glossary button shows alongside an
+  explanation of the projection itself.
 
 The workspace root is a *virtual* manifest (`[workspace]` only, no package), so
 the crates are named peers.

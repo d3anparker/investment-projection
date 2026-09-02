@@ -156,7 +156,7 @@ pub const APP_GLOSSARY: &[GlossaryEntry] = &[
                      withdrawal order — tax, income delivered, how long it \
                      lasts, what is left, allowance unused — and picks no \
                      winner. The order that pays least tax is usually worse on \
-                     something else, and a single 'best' figure would read as a \
+                     something else, and a single \u{201c}best\u{201d} figure would read as a \
                      recommendation whatever it was called.",
         seen_in: "The comparison table, which has no highlighted row.",
         topic: topics::DRAWDOWN,
@@ -240,12 +240,36 @@ pub const APP_GLOSSARY: &[GlossaryEntry] = &[
     },
 ];
 
+/// Whether an entry answers `needle`, matched case-insensitively against the
+/// term, its alternative names and its definition.
+///
+/// The definition is included deliberately: a reader who half-remembers "the
+/// one about the yearly charge" has the definition's words, not the term's —
+/// looking up a word you already know is the case that needs help least.
+/// A blank needle matches everything, so an empty box is not a filter.
+pub fn matches(entry: &GlossaryEntry, needle: &str) -> bool {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    [entry.term, entry.also, entry.definition]
+        .iter()
+        .any(|field| field.to_lowercase().contains(&needle))
+}
+
+/// The entries of one glossary that answer `needle`, in their original order.
+pub fn matching(entries: &'static [GlossaryEntry], needle: &str) -> Vec<&'static GlossaryEntry> {
+    entries.iter().filter(|e| matches(e, needle)).collect()
+}
+
 /// Group entries into their topic sections, preserving order.
 ///
 /// Entries are already contiguous by topic (each glossary's own tests pin
 /// that), so this is a single pass and never reorders anything: a system
-/// decides how its terms read, not the renderer.
-pub fn sections(entries: &'static [GlossaryEntry]) -> Vec<(&'static str, Vec<&'static GlossaryEntry>)> {
+/// decides how its terms read, not the renderer. Filtering cannot break the
+/// grouping either — dropping entries from a contiguous run leaves it
+/// contiguous.
+pub fn sections(entries: Vec<&'static GlossaryEntry>) -> Vec<(&'static str, Vec<&'static GlossaryEntry>)> {
     let mut out: Vec<(&'static str, Vec<&'static GlossaryEntry>)> = Vec::new();
     for e in entries {
         match out.last_mut() {
@@ -277,14 +301,19 @@ pub fn see_also_line(entries: &'static [GlossaryEntry], entry: &GlossaryEntry) -
 }
 
 /// One glossary's sections, as a run of headings and definition lists.
-fn glossary_view(heading: String, entries: &'static [GlossaryEntry]) -> View {
-    if entries.is_empty() {
+///
+/// `entries` is the whole glossary — cross-references resolve against all of
+/// it, not only what survived the filter, so a "see also" does not lose its
+/// wording just because the entry it names is filtered out.
+fn glossary_view(heading: String, entries: &'static [GlossaryEntry], needle: &str) -> View {
+    let shown = matching(entries, needle);
+    if shown.is_empty() {
         return ().into_view();
     }
     view! {
         <section class="gloss-group">
             <h3>{heading}</h3>
-            {sections(entries)
+            {sections(shown)
                 .into_iter()
                 .map(|(topic, items)| {
                     view! {
@@ -349,8 +378,11 @@ fn glossary_view(heading: String, entries: &'static [GlossaryEntry]) -> View {
 pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
     let dialog: NodeRef<html::Dialog> = create_node_ref();
     let open = create_rw_signal(false);
+    let query = create_rw_signal(String::new());
 
     let show = move |_| {
+        // A stale filter from last time would look like a half-empty glossary.
+        query.set(String::new());
         open.set(true);
         if let Some(d) = dialog.get_untracked() {
             let _ = d.show_modal();
@@ -388,26 +420,65 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
                     "Close"
                 </button>
             </div>
+            // Its own bar between the header and the scrolling body, so it
+            // stays reachable however far down the list the reader has got.
+            <div class="glossary-filter">
+                <input
+                    type="search"
+                    aria-label="Filter glossary terms"
+                    placeholder="Filter terms"
+                    prop:value=move || query.get()
+                    on:input=move |ev| query.set(event_target_value(&ev))
+                />
+            </div>
             <div class="glossary-body">
                 {move || {
                     open.get()
                         .then(|| {
                             let sys = system();
+                            let needle = query.get();
+                            let hits = matching(APP_GLOSSARY, &needle).len()
+                                + matching(sys.glossary(), &needle).len();
                             // Content projection: after the generic term list,
                             // the jurisdiction may insert whatever a flat list
                             // cannot say. A jurisdiction with none renders no
                             // wrapper element at all.
-                            let projected = crate::jurisdiction::from_id(&jurisdiction.get())
-                                .glossary_panel
-                                .map(|panel| panel(crate::jurisdiction::GlossarySlot));
+                            // Hidden while filtering: a worked example is not a
+                            // term, so it can neither match nor honestly be
+                            // shown among the handful of entries that did.
+                            let projected = needle.trim().is_empty()
+                                .then(|| {
+                                    crate::jurisdiction::from_id(&jurisdiction.get())
+                                        .glossary_panel
+                                        .map(|panel| panel(crate::jurisdiction::GlossarySlot))
+                                })
+                                .flatten();
                             view! {
                                 <p class="glossary-intro">
                                     "What the words on this page mean, and how to read the \
                                      figures. Descriptions only \u{2014} nothing here is \
                                      financial or tax advice."
                                 </p>
-                                {glossary_view("How this projection works".to_string(), APP_GLOSSARY)}
-                                {glossary_view(format!("{} tax terms", sys.label()), sys.glossary())}
+                                // An empty panel reads as a broken one, so say
+                                // plainly that the filter matched nothing.
+                                {(hits == 0)
+                                    .then(|| {
+                                        view! {
+                                            <p class="glossary-empty">
+                                                "No terms match \u{201c}" {needle.clone()} "\u{201d}."
+                                            </p>
+                                        }
+                                    })}
+                                {glossary_view(
+                                    "How this projection works".to_string(),
+                                    APP_GLOSSARY,
+                                    &needle,
+                                )}
+                                {glossary_view(
+                                    format!("{} tax terms", sys.label()),
+                                    sys.glossary(),
+                                    &needle,
+                                )}
                                 {projected}
                             }
                         })
@@ -422,9 +493,14 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// Every entry, as `sections` wants them.
+    fn all() -> Vec<&'static GlossaryEntry> {
+        APP_GLOSSARY.iter().collect()
+    }
+
     #[test]
     fn sections_group_without_reordering() {
-        let grouped = sections(APP_GLOSSARY);
+        let grouped = sections(all());
         let flat: Vec<&str> = grouped
             .iter()
             .flat_map(|(_, items)| items.iter().map(|e| e.id))
@@ -436,7 +512,7 @@ mod tests {
 
     #[test]
     fn a_topic_never_starts_twice() {
-        let grouped = sections(APP_GLOSSARY);
+        let grouped = sections(all());
         let mut seen = HashSet::new();
         for (topic, items) in &grouped {
             assert!(seen.insert(*topic), "topic {topic:?} resumes after another");
@@ -446,7 +522,7 @@ mod tests {
 
     #[test]
     fn sections_of_nothing_is_nothing() {
-        assert!(sections(&[]).is_empty());
+        assert!(sections(Vec::new()).is_empty());
     }
 
     #[test]
@@ -507,6 +583,49 @@ mod tests {
 
     /// The app's own terms describe the projection, not any jurisdiction, and
     /// must never print money — the symbol is reactive and would go stale.
+    #[test]
+    fn a_blank_filter_is_not_a_filter() {
+        assert_eq!(matching(APP_GLOSSARY, "").len(), APP_GLOSSARY.len());
+        assert_eq!(matching(APP_GLOSSARY, "   ").len(), APP_GLOSSARY.len());
+    }
+
+    #[test]
+    fn the_filter_ignores_case_and_surrounding_space() {
+        let hits = matching(APP_GLOSSARY, "  HANDover ");
+        assert_eq!(hits.len(), matching(APP_GLOSSARY, "handover").len());
+        assert!(hits.iter().any(|e| e.id == "handover"));
+    }
+
+    /// Matching the definition, not only the term: a reader who half-remembers
+    /// what something does has the definition's words, not the term's.
+    #[test]
+    fn the_filter_reaches_into_definitions_and_alternative_names() {
+        assert!(matching(APP_GLOSSARY, "rebalanced")
+            .iter()
+            .any(|e| e.id == "pro_rata"));
+        assert!(matching(APP_GLOSSARY, "inflation")
+            .iter()
+            .any(|e| e.id == "not_advice"));
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_returns_nothing() {
+        assert!(matching(APP_GLOSSARY, "zzzznotaterm").is_empty());
+    }
+
+    /// Filtering drops entries from runs that were already contiguous, so the
+    /// grouping cannot fragment however narrow the filter gets.
+    #[test]
+    fn filtering_never_splits_a_topic() {
+        for needle in ["", "the", "a", "month", "tax"] {
+            let grouped = sections(matching(APP_GLOSSARY, needle));
+            let mut seen = HashSet::new();
+            for (topic, _) in &grouped {
+                assert!(seen.insert(*topic), "{needle:?} split topic {topic:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_app_glossary_names_no_currency() {
         for e in APP_GLOSSARY {
