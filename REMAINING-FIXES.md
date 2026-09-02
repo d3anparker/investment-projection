@@ -12,8 +12,60 @@ decision left to you is a genuine choice rather than an open question.
 | 1 | No tax on German capital with no other income | **Fixed** `05ea147` | Optional: model it faithfully |
 | 2 | Deposits counted as growth for the yearly fund charge | Open | Widen `PeriodPot` — cheaper than first thought |
 | 3 | Input boxes showed £ under Germany | **Fixed** `05ea147` | Optional: decide £5 vs 5 € |
-| 4 | Unused allowance counted during the saving-up years | Open | Decide who owns it — I suggest `calc` |
+| 4 | Unused allowance counted during the saving-up years | Open | Decide who owns it — `calc` recommended |
 | 5 | Pension start-year box shows one year, uses another | Open | Seed it synchronously |
+
+---
+
+# Who wrote what, and whose opinions these are
+
+This file has two authors, and the **Assessment** sections are opinions, not
+findings. If you are picking this up in a fresh session, read this first — the
+first person in those sections is *not* you.
+
+**The five findings** (the "Where / what happens now / why I did not fix it"
+descriptions) came from a **code-review session**, committed in `f0f669c`. That
+session read the Germany work with fresh eyes and deliberately implemented none
+of it, on the grounds that each item needed a decision from the repository owner.
+
+**The fixes to 1 and 3, all the measured figures, and every `Assessment`
+section** came from the **implementation session** that built the Germany work
+in the first place — the `taxkit` contract changes, the `de-tax` crate and the
+runtime jurisdiction picker, commits `0ca3c5c` through `05ea147`. So "I
+recommend" in an Assessment means *that* session, writing with knowledge of why
+the code is shaped as it is.
+
+That provenance cuts both ways and you should weigh it accordingly:
+
+- **In favour:** those assessments are backed by figures actually measured
+  against the running code (reproduction recipes below), not by reading alone,
+  and they draw on the design reasoning behind `taxkit` and `de-tax`.
+- **Against:** it is the author of the code marking its own homework. Where it
+  says a finding was "smaller than first assessed" (item 2) or offers "a third
+  option" (item 4), treat that as an interested party's argument, not a neutral
+  ruling. The review session's caution about widening a shared contract is a
+  legitimate position that the assessment argues against rather than refutes.
+- **Declared interest:** the thread-local weakness under *Also worth knowing* is
+  the implementation session's own doing, not a review finding. It is recorded
+  there as such rather than being quietly folded into item 5.
+
+**If you add to this file,** append your own attributed section rather than
+editing an existing Assessment in place. The value here is the record of who
+concluded what, on what evidence — rewriting it in a later voice destroys that.
+
+## Reproducing the measured figures
+
+The numbers quoted below came from throwaway tests that were deleted after use.
+To re-derive them, open a `de-tax` session directly (`DE.open(&SessionSpec{ .. }`
+with `region: "de_none"`) and:
+
+- **Item 2 (€149.81):** call `period_charge` with a single
+  `PeriodPot { pot: fonds_aktien available 110000, opening: 100000 }` — a fund
+  that fell to 90,000 but received 20,000 of deposits.
+- **Item 4 (€280,308):** call `start_period()` twenty times without drawing
+  anything, then read `unused_allowance()`.
+- **Item 1 (now fixed):** the €500,000-at-€0 case is pinned permanently by
+  `de-tax/src/engine.rs`'s `capital_is_taxed_even_when_there_is_no_other_income`.
 
 ---
 
@@ -110,7 +162,7 @@ deposits are sitting in the end value, so the sum reads them as growth.
 deposits ended higher than it started, and was charged **€149.81**. The correct
 charge is zero.
 
-### My view
+### Assessment — implementation session
 
 **Real, and worth fixing — but smaller than it was first assessed.**
 
@@ -160,7 +212,7 @@ up with the day drawdown begins. Save for 30 months and the clock ticks at 12,
 24 and 36 — so the first drawdown "year" is six months long but still carries a
 full year of allowances.
 
-### My view
+### Assessment — implementation session
 
 **This matters more than its size suggests.** `unused_allowance` is the
 show-your-working column in the strategy comparison — the one that explains why
@@ -204,7 +256,7 @@ quietly falls back to whatever year the tax tables were written for.
 wrong. It diverges the moment the calendar reaches 2027 before the tables are
 refreshed: the box would say 2027 while the sums use 2026, with no warning.
 
-### My view
+### Assessment — implementation session
 
 **Real but genuinely low priority** — it is invisible until a year boundary, and
 the tax tables going stale already raises a warning of its own.
@@ -237,10 +289,11 @@ about item 5.
 
 The app remembers the active jurisdiction in a single shared spot
 (`convert::active_system()`, a thread-local) that anything can read at any time,
-with nothing guaranteeing it is current when read. **This was introduced in
-Phase C1 and is my responsibility, not the review's.** It was chosen to avoid
-threading a tax-system parameter through about sixty call sites, which was a
-real trade — but it left this edge.
+with nothing guaranteeing it is current when read. **The implementation session
+(this file's second author) introduced this in Phase C1; it is that session's
+own doing, not a review finding.** It was chosen to avoid threading a
+tax-system parameter through about sixty call sites, which was a real trade —
+but it left this edge.
 
 **Partly addressed.** The browser suite no longer depends on it: its `kinds()`
 helper read the thread-local *before* mounting, so once any test switched to
@@ -264,7 +317,7 @@ reactive context (as the currency symbol already is) rather than a thread-local.
 | 1 | ~~No tax on German capital~~ | ~~Serious~~ | **Fixed.** Faithful version optional, decide with 4 |
 | 2 | Deposits counted as growth for the fund charge | Medium, bounded | None really — widen `PeriodPot`, 2 files |
 | 3 | ~~Input boxes showed £~~ | ~~Medium~~ | **Fixed.** Sign placement still open |
-| 4 | Unused allowance counted while only saving | Medium, misleads | Who owns it — I suggest `calc` at the handover |
+| 4 | Unused allowance counted while only saving | Medium, misleads | Who owns it — `calc` at the handover is recommended |
 | 5 | Start-year box shows one year, uses another | Small, latent | None — seed it synchronously |
 
 Everything else the review found is already fixed and tested. Current state:
