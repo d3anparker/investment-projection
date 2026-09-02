@@ -31,8 +31,9 @@
 //! Not modelled, and each a deliberate simplification a tool "for curiosity, not
 //! advice" can carry: the Vorabpauschale's realised-gain cap is approximated
 //! during drawdown; social contributions (Kranken-/Pflegeversicherung) on
-//! pension income -- these are not tax; the Günstigerprüfung is applied as a
-//! monotone lesser-of rather than the statutory annual election; capital losses
+//! pension income -- these are not tax; the Günstigerprüfung (capital income is
+//! always charged the flat rate, which over-taxes a holder whose personal rate
+//! is lower -- see `engine::GermanSession::capital_rate`); capital losses
 //! and their separate buckets (`taxkit::Pot` cannot express a loss); dividend and
 //! interest income as such (the projection models total return only); and
 //! inheritance tax. None of this is tax advice.

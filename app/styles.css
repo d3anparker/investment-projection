@@ -305,7 +305,13 @@ table {
   margin-bottom: 4px;
 }
 
-/* £ / % adornments — cosmetic only, never touch the parsed value */
+/* Currency / % adornments — cosmetic only, never touch the parsed value.
+   The currency glyph is NOT written here: `--currency` is set on `.layout`
+   from the active tax system, so these follow a jurisdiction switch like every
+   other figure. A stylesheet cannot ask the tax system anything, so it has to
+   be told. No literal fallback on purpose — an unset variable renders no
+   adornment at all, which is a safe degradation, and it lets CI grep this file
+   for currency literals. */
 .adorn {
   position: relative;
   display: block;
@@ -321,7 +327,7 @@ table {
 }
 
 .adorn-money::before {
-  content: "\00a3";
+  content: var(--currency);
   left: 9px;
 }
 
@@ -432,7 +438,7 @@ select:focus,
 }
 
 /* strip the native number spinners — they clutter these money/percent fields
-   and their arrows collide with the £/% adornments, clipping short values */
+   and their arrows collide with the currency/% adornments, clipping short values */
 input[type="number"] {
   -moz-appearance: textfield;
   appearance: textfield;

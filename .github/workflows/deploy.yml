@@ -50,6 +50,14 @@ jobs:
       - name: app names a jurisdiction only inside jurisdiction/
         run: |
           ! grep -rn "uk_tax\|de_tax" app/src --include=*.rs | grep -v "^app/src/jurisdiction/"
+      # The stylesheet is the one place that draws money without being able to
+      # ask the tax system, so it is the one place a currency can silently go
+      # stale — `.adorn-money::before` printed a pound under Germany for exactly
+      # that reason. The greps above only read .rs files, so this needs its own.
+      # The symbol now arrives as the `--currency` custom property.
+      - name: the stylesheet names no currency
+        run: |
+          ! grep -n -e '00a3' -e '20ac' -e '£' -e '€' app/styles.css
 
   # Headless-browser suite for the App component and its children
   # (app/tests/ui.rs). ubuntu-latest ships Firefox + geckodriver already, so we

@@ -226,10 +226,27 @@ impl GermanSession {
         }
     }
 
-    /// Günstigerprüfung, simplified to a monotone lesser-of: capital is charged
-    /// at the flat rate or the personal marginal rate, whichever is lower.
+    /// The rate capital income is charged at: always the flat Abgeltungsteuer.
+    ///
+    /// The Günstigerprüfung — the election to be taxed at the personal rate when
+    /// that is lower — is **deliberately not modelled**. It was, as a lesser-of
+    /// against the personal marginal rate, and that was wrong in a way worth
+    /// recording so it is not reintroduced: the probe read `self.income`, which
+    /// excludes the capital being withdrawn, and capital draws post to `kapital`
+    /// rather than `income`. So a holder with no other income sat at the zero
+    /// rate of §32a zone 1 for ever and paid **nothing on any amount** — a
+    /// missing bill, not a rounding error, and the app's blank "other income"
+    /// box made it the default first experience of Germany.
+    ///
+    /// Charging the flat rate over-taxes a holder whose true personal rate is
+    /// lower, by a bounded amount. Over-stating a tax bill in a tool that
+    /// disclaims advice is the safe direction; understating it without limit is
+    /// not. Modelling it properly means pricing capital through the progressive
+    /// [`Tarif`](crate::tarif::Tarif) rather than a flat rung — the walker
+    /// exists, so it is a real but self-contained piece of work, not new
+    /// machinery.
     fn capital_rate(&self) -> Decimal {
-        self.flat_rate.min(self.tarif.marginal_rate_at(self.income))
+        self.flat_rate
     }
 
     fn sparer_remaining(&self) -> Decimal {
@@ -463,6 +480,29 @@ mod tests {
     }
 
     // --- capital income (Abgeltungsteuer) ----------------------------------
+
+    #[test]
+    fn capital_is_taxed_even_when_there_is_no_other_income() {
+        // The regression that matters most: the app's "other income" box starts
+        // blank, so zero is the *default* case, not a corner one. A lesser-of
+        // Günstigerprüfung probed at `income` (which excludes the capital being
+        // withdrawn, and never grows because capital posts to `kapital`) parked
+        // this holder at §32a zone 1's 0% and charged nothing on any amount.
+        let mut s = plain("0");
+        // €1,000,000 with a €500,000 basis: €500,000 of pure gain.
+        let drawn = s
+            .draw(&pot(ids::DEPOT_AKTIEN, "1000000", "500000"), d("300000"), StopAt::Requirement)
+            .unwrap();
+        assert!(
+            drawn.tax > d("40000"),
+            "a large gain must be taxed with no other income, got {}",
+            drawn.tax
+        );
+        // The whole bill, not a token amount: the flat rate on the gain half,
+        // less the Sparer-Pauschbetrag.
+        let keep = s.marginal_keep(&pot(ids::DEPOT_AKTIEN, "700000", "350000"));
+        assert_eq!(keep.round_dp(4), d("0.8681"), "leak 0.5 at 26.375%");
+    }
 
     #[test]
     fn a_depot_gain_pays_the_effective_flat_rate_after_the_allowance() {
