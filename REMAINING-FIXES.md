@@ -1,266 +1,272 @@
 # Still to fix
 
-Five things still to change. Four came out of the code review; number 3 you
-spotted yourself. Each one needs you to decide something, so none was mine to
-just fix.
+Five things came out of the code review. **Two are now fixed** (1 and 3); three
+are still open (2, 4 and 5).
 
-They are in order of how much they matter.
+The original numbering is kept so earlier discussion still lines up. Each open
+item now carries what was actually measured and a recommendation, so the
+decision left to you is a genuine choice rather than an open question.
 
----
-
-## 1. Germany charges no tax at all on shares if you have no other income
-
-**Where:** `de-tax/src/engine.rs`, the `capital_rate` function.
-
-**What happens now**
-
-Germany has two ways to tax money you make from shares and funds:
-
-- a flat rate of about 26%, or
-- your normal income tax rate, if that works out cheaper for you.
-
-The code picks whichever is cheaper. That part is right.
-
-The problem is *how* it works out your normal income tax rate. It looks at the
-money you already have coming in, and ignores the share money you are about to
-take out.
-
-So if you have no other income, it looks at zero. Tax on zero income is zero.
-So it decides your normal rate is 0%, and 0% is cheaper than 26%, so it charges
-you nothing.
-
-And it charges you nothing *no matter how much you take out*.
-
-**Proof**
-
-I ran it. Someone with no other income takes 500,000 euros of pure profit out
-of a share account. The tool says the tax is **zero euros**.
-
-That is not a rounding problem. That is the whole tax bill missing.
-
-**Why this is bad**
-
-The app's boxes start empty. "Other income" starts blank, which means zero. So
-this is not a weird corner case — it is what happens the first time anyone tries
-Germany.
-
-**Why I did not fix it**
-
-There is no small fix. Two options, both need a real decision from you:
-
-1. **Count the share money as income as you take it out.** Then the rate climbs
-   as the year goes on, which is closer to the truth. But that money would then
-   start eating the tax-free income allowance, which changes how pensions are
-   taxed too. That is a knock-on effect you should choose on purpose, not have
-   me sneak in.
-
-2. **Build the rising rate into the price list properly.** This is the "right"
-   answer but the tool that holds price lists can only handle flat steps, and
-   Germany's rate climbs smoothly. It would need new machinery.
+| # | Item | State | Next step |
+|---|------|-------|-----------|
+| 1 | No tax on German capital with no other income | **Fixed** `05ea147` | Optional: model it faithfully |
+| 2 | Deposits counted as growth for the yearly fund charge | Open | Widen `PeriodPot` — cheaper than first thought |
+| 3 | Input boxes showed £ under Germany | **Fixed** `05ea147` | Optional: decide £5 vs 5 € |
+| 4 | Unused allowance counted during the saving-up years | Open | Decide who owns it — I suggest `calc` |
+| 5 | Pension start-year box shows one year, uses another | Open | Seed it synchronously |
 
 ---
 
-## 2. Germany's yearly fund charge treats your savings as profit
+# Fixed
 
-**Where:** `de-tax/src/engine.rs`, the line that works out `gain`.
+## 1. Germany charged no tax at all on capital with no other income — fixed
 
-**What happens now**
+**Was:** `de-tax/src/engine.rs`, `capital_rate`.
 
-Germany charges a small tax each year on funds you are just *holding*, even if
-you sell nothing. There is a fair rule attached: the charge can never be bigger
-than how much the fund actually went up that year. If the fund went down, you
-pay nothing.
+Germany taxes capital gains at a flat ~26%, *or* at your normal income tax rate
+if that is cheaper. The code picked the cheaper of the two, which is right in
+principle. It worked out your normal rate from the income you already had,
+ignoring the capital you were about to take out — and capital withdrawals are
+booked separately, so that figure never grew.
 
-The code works out "how much it went up" by taking the value at the end of the
-year and subtracting the value at the start.
+With no other income the answer was always "your normal rate is 0%", and 0% wins
+every comparison. **Measured: €500,000 of pure gain came back taxed at €0.** The
+same draw with €60,000 of other income was taxed €75,650, so it was the whole
+bill missing, not a rounding error. Because the "other income" box starts blank,
+this was the *default* first experience of Germany, not a corner case.
 
-That is fine if you left it alone. But if you were paying money in every month,
-that money is sitting in the end value too. So the sum thinks your own savings
-were profit.
+It was also broader than "no other income": the comparison rate was read at the
+wrong point for everyone whose personal marginal rate sits below 26.375% — which
+is any income below about **€24,750** (where the §32a marginal crosses the flat
+rate). Zero income was the catastrophic end of that range, not the whole of it.
 
-**What goes wrong**
+**Now:** capital is always charged the flat Abgeltungsteuer. The
+Günstigerprüfung is not modelled at all, and says so in `de-tax/src/lib.rs`.
 
-A fund that lost money all year, but that you paid into every month, ends the
-year worth more than it started. The code sees that and says "it went up", so it
-charges you the tax. In real life you would owe nothing, because the fund fell.
+**The trade, stated plainly.** This over-taxes someone whose genuine personal
+rate is lower, by a bounded amount. That is the safe direction for a tool that
+disclaims advice; understating a bill without limit is not. A regression test
+(`capital_is_taxed_even_when_there_is_no_other_income`) pins it, and the reason
+is written on `capital_rate` itself so the lesser-of is not reintroduced by
+someone fixing the over-taxation in good faith.
 
-**Why I did not fix it**
+**Still open, if you want it.** Modelling the Günstigerprüfung properly means
+pricing capital through the progressive `Tarif` walker instead of a flat rung.
+The original note called this "new machinery" — it is not: `de-tax/src/tarif.rs`
+already exists and does exactly this for pensions. It is a real but
+self-contained piece of work. **Decide it together with item 4** — see the
+coupling noted there.
 
-To fix it, the fund has to be told how much money was paid into it during the
-year. Right now nothing tells it that. Adding that means changing the shared
-agreement that sits between the maths engine and every country's tax rules —
-which is a bigger change than a review should make on its own.
+## 3. The input boxes showed £ when Germany was picked — fixed
 
-There is already a note in the code admitting the *opposite* problem happens
-when you are taking money out. This one is not mentioned, so at the very least
-the note should say both.
+**Was:** `app/styles.css`, `.adorn-money::before`.
 
----
+Picking Germany switched the answers to euros but left a pound sign inside each
+of the six money boxes you type into, so the screen showed £ and € at once for
+the same money.
 
-## 3. The boxes you type into still show £ when Germany is picked
+The sign was not in the program at all. It was in the stylesheet, as
+`content: "\00a3"` — a pound spelled in a way that does not look like one.
+Everything else that prints money asks the tax system which sign to use; a
+stylesheet cannot ask anything.
 
-**Where:** `app/styles.css`, the `.adorn-money::before` rule.
+**Now:** the program tells it. `--currency` is set on `.layout` from the active
+tax system, and the rule reads `content: var(--currency)`. Verified in the real
+app: the boxes read "€ 10000" alongside euro figures.
 
-**What happens now**
+**Two deliberate choices worth knowing.**
 
-Pick Germany and the *answers* switch to euros — the big numbers, the table, the
-chart. That part works.
+There is **no literal fallback** in the CSS. An unset variable renders no
+adornment rather than a wrong one — a safe degradation — and it means the
+stylesheet can be grepped for currency literals, which is now a CI step. That
+grep gap is why this survived Phase C in the first place: the existing boundary
+checks only read `.rs` files, so nothing was ever looking at the stylesheet.
 
-But the little currency sign sitting inside each box you type into stays a pound
-sign. Six boxes: value today, monthly deposit, cost, monthly withdrawal, other
-income, and the goal target.
-
-So the screen shows you £ and € at the same time, for the same money.
-
-**Why it was missed**
-
-The pound sign is not in the program. It is in the stylesheet, written as a
-decoration glued to the edge of the box:
-
-```
-content: "\00a3";
-```
-
-`\00a3` is a pound sign, spelled in a way that does not look like one.
-
-Everything else that prints money asks the country which sign to use. This one
-never asks anybody — the stylesheet just draws it. So when the country switch was
-built, this was not on the list of things to update, because nothing connected it
-to the country in the first place.
-
-It also slips past the safety checks. There are automatic checks that hunt for
-country-specific things in the wrong place, but they only read program files.
-Nothing checks the stylesheet.
-
-**What the fix looks like**
-
-The stylesheet cannot ask the country anything — it has to be told. So the
-program needs to hand the sign down to it as a named value, and the rule uses
-that value instead of a fixed pound sign.
-
-That is a small change and I could have done it. I have left it here because
-there are two decisions attached that are yours, not mine:
-
-1. **Where the sign goes.** Britain writes £5, Germany normally writes 5 €, with
-   the sign after the number. Right now everything in the app puts the sign
-   first. Matching German habit properly means the box decoration has to be able
-   to sit on either side — a bigger change than swapping one character.
-
-2. **Whether the answers should move too.** The output figures also put € first.
-   Whatever you choose, the boxes and the answers should agree, so it is one
-   decision covering both rather than two half-fixes.
-
-If you would rather just stop the wrong sign showing and settle the placement
-question later, say so and I will do the one-character version.
+**Sign placement is untouched and still yours to decide.** Britain writes £5,
+Germany normally writes 5 €. Everything in the app — boxes and answers alike —
+still puts the sign first. That is at least *consistent*, which the old state
+was not, so it is no longer a bug, just a convention that does not match German
+habit. Fixing it properly means the adornment has to be able to sit on either
+side, and the output figures should move with it, so it is one decision covering
+both.
 
 ---
 
-## 4. The "unused allowance" number counts years you could never have used
+# Still outstanding
 
-**Where:** `calc/src/engine.rs`, the line that sets `anchor`.
+## 2. Germany's yearly fund charge treats your deposits as growth
 
-**What happens now**
+**Where:** `de-tax/src/engine.rs`, the `gain` line in `period_charge`.
 
-Everyone gets a chunk of income each year they pay no tax on. If you do not use
-all of it, the app adds it to an "allowance unused" total. That total is there
-to explain *why* one way of taking your money beats another.
+Germany charges a small tax each year on funds you are merely *holding*. A fair
+rule limits it: the charge can never exceed how much the fund actually rose that
+year, and if the fund fell you pay nothing.
 
-Germany needed the tax year clock to start on day one, because its yearly fund
-charge happens while you are still saving up. Fair enough. But turning that
-clock on also switched on the allowance counter, all the way through the
-saving-up years.
+The code measures "how much it rose" as end value minus start value. That is
+right if you left the fund alone — but if you were paying in monthly, your own
+deposits are sitting in the end value, so the sum reads them as growth.
 
-**What goes wrong**
+**Verified.** A fund that **fell 10%** over the year but received €20,000 of
+deposits ended higher than it started, and was charged **€149.81**. The correct
+charge is zero.
 
-Picture saving for 20 years, then drawing down. During those 20 years you are
-taking nothing out, so of course you use none of the allowance. There was
-nothing to use it on.
+### My view
 
-The app counts it anyway. That is 20 years of allowance, roughly a quarter of a
-million euros, added to a number that is supposed to mean "money you left on the
-table".
+**Real, and worth fixing — but smaller than it was first assessed.**
 
-Britain does not have this problem, because its clock only starts when you begin
-drawing down.
+Two things make it less alarming than item 1 was. The charge is capped at the
+Basisertrag (about 2.24% of the opening value), so this is a *bounded*
+over-charge, not an unbounded one. And it only bites during accumulation, when
+deposits are flowing; a pure drawdown is unaffected.
 
-**There is a second problem with the same cause**
+I also think the original assessment over-stated the cost. It reads as widening
+"the shared agreement between the maths engine and every country's tax rules",
+which sounds like a change with wide blast radius. In practice `PeriodPot` is
+new, and has **exactly one producer (`calc`) and one consumer (`de-tax`)**.
+Adding a `contributed` field to it touches two files and breaks nothing else.
+The instinct to treat the shared contract carefully is right in general; this
+particular corner of it is barely used yet.
 
-Starting the clock on day one also means the tax year no longer lines up with
-the day you start drawing down.
+**Recommended:** add `contributed: Decimal` to `PeriodPot`, have `calc` fill it
+(it already knows), and compute the cap as
+`available − opening − contributed`. Pin it with a test using the numbers above.
 
-Say you save for 30 months, then start drawing. The clock ticks over at month
-12, 24, 36. So your first "year" of drawing down is only 6 months long — but it
-still hands you a full year's worth of tax-free allowances.
+**Do this regardless, it costs nothing:** the comment beside that line currently
+admits only the *opposite* error — that the cap under-states during drawdown.
+It should name both directions. Right now the code documents one of its two
+known inaccuracies, which is worse than documenting neither, because it reads as
+though the case has been thought through.
 
-The code has a comment right next to it warning about exactly this. It says
-starting the clock at month zero "would manufacture a stub first period carrying
-a full year's allowances". Then the German version does it anyway.
+## 4. "Unused allowance" counts years you could never have used it
 
-**Why I did not fix it**
+**Where:** `calc/src/engine.rs`, the `anchor` line.
 
-Two ways to do it and I do not know which you want:
+Everyone gets a slice of income each year they pay no tax on. Anything unused is
+added to an "allowance unclaimed" total, which exists to explain *why* one way
+of taking your money beats another.
 
-1. The maths engine stops the counter until drawing-down starts.
-2. Germany's rules stop counting during the saving-up years.
+Germany needed the tax-year clock to start on day one, because its yearly fund
+charge happens while you are still saving. But starting the clock also started
+the allowance counter, right through the saving-up years — when you are taking
+nothing out and so could not possibly have used it.
 
-Option 2 needs Germany's rules to know which phase it is in, and right now they
-are not told. So somebody has to decide who owns this.
+**Verified.** Twenty idle accumulation years bank **€280,308** of "unused
+allowance" with nothing ever withdrawn.
 
-The stub-year problem has a neat one-line fix — start the clock at
-`horizon % 12` instead of `0`, so a tick always lands exactly on the day you
-start drawing. But it changes the numbers the app reports, and it has to stay
-switched off for Britain or Britain picks up problem one. So it is a decision,
-not a tidy-up.
+Britain is unaffected: its clock only starts at the handover.
 
----
+**There is a second problem with the same cause.** The tax year no longer lines
+up with the day drawdown begins. Save for 30 months and the clock ticks at 12,
+24 and 36 — so the first drawdown "year" is six months long but still carries a
+full year of allowances.
+
+### My view
+
+**This matters more than its size suggests.** `unused_allowance` is the
+show-your-working column in the strategy comparison — the one that explains why
+one withdrawal order beats another. A number inflated by years that had nothing
+to spend does not merely look odd; it actively misleads about the thing that
+column exists to justify.
+
+The original note offers two options: `calc` stops the counter until drawdown, or
+Germany's rules stop counting during accumulation. It rightly points out that the
+second needs Germany to know which phase it is in, which it is not told.
+
+**I would take neither. There is a third option that is cleaner than both:**
+have `calc` record `unused_allowance()` at the handover and report only the
+growth from that point on. No contract change, no new field, and — the important
+part — **`de-tax` never needs to learn what phase it is in.** Phase knowledge
+stays in `calc`, which already has it. Keeping tax systems ignorant of the
+projection's shape is worth protecting; it is the property that lets a
+jurisdiction crate be tested standalone.
+
+On the stub-year half: the suggested `horizon % 12` one-liner does fix the
+alignment, and it is correct that it changes reported numbers and must not apply
+to Britain. I would treat it as a separate, smaller decision from the counter
+problem — they share a cause but not a fix.
+
+**One coupling to be aware of.** If you later model the Günstigerprüfung
+properly (item 1), capital income starts consuming the Grundfreibetrag, which
+changes both pension taxation *and* this number. **Items 1 and 4 should be
+decided together**, or the second will silently undo assumptions made in the
+first.
 
 ## 5. The "year you start drawing" box shows a year it does not use
 
 **Where:** `app/src/jurisdiction/de.rs`.
 
-**What happens now**
+Germany asks what year you start drawing your pension, because that year locks
+in how much of it is taxed, for life. The box offers the current year as a
+suggestion — but only *displays* it. Nothing is handed to the maths, which
+quietly falls back to whatever year the tax tables were written for.
 
-Germany has a box asking what year you start taking your pension. It matters,
-because the year you start locks in how much of that pension gets taxed, for
-life.
+**Confirmed, and currently latent.** Both say 2026 today, so nothing looks
+wrong. It diverges the moment the calendar reaches 2027 before the tables are
+refreshed: the box would say 2027 while the sums use 2026, with no warning.
 
-The box shows the current year as a starting suggestion. But it only *shows* it.
-It never actually hands that year over to the maths. When nothing is handed
-over, the maths quietly falls back to whatever year the tax tables were written
-for.
+### My view
 
-**What goes wrong**
+**Real but genuinely low priority** — it is invisible until a year boundary, and
+the tax tables going stale already raises a warning of its own.
 
-Right now both say 2026, so nothing looks wrong. But the tax tables only get
-updated once a year. The moment the calendar rolls into 2027 and the tables have
-not been refreshed yet, the box on screen says 2027 while the sums behind it use
-2026. Different numbers, no warning.
+The original fix wrote the default into the option map from a render effect, and
+was withdrawn because the write landed a moment late and leaked the jurisdiction
+into the following test. That diagnosis is correct, and the fix was rightly
+withdrawn rather than papered over.
 
-**Why I did not fix it**
+**Recommended:** seed `base_year` into the options map **synchronously, where
+`App` builds it from `ShareState`**, not from a render-time effect. There is no
+late write to leak, so the ordering problem never arises. That is a smaller
+change than the one that was tried, and it sidesteps the obstacle rather than
+fighting it.
 
-I did write the fix, and then took it back out.
-
-The fix makes the box save its suggestion the moment it appears. That save
-happens a split second late, and that was enough to confuse a test: one test
-would set the country to Germany, finish, and the late save would fire
-afterwards and leave Germany switched on for the *next* test, which expected
-Britain. That test then failed.
-
-That is worth knowing on its own. The app remembers "which country are we in"
-in a single shared spot that anything can read at any time. Nothing guarantees
-it is up to date when you read it. My small fix did not create that weakness, it
-just tripped over it. It is likely to trip someone else up later.
+An alternative worth considering instead: drop the visible default entirely and
+let the box start blank, showing the fallback year as placeholder text. Then
+what is displayed and what is used can never disagree, because nothing is
+displayed that has not been chosen. Slightly worse as a prompt, but honest by
+construction.
 
 ---
 
-## Summary
+# Also worth knowing
 
-| # | Fix | How bad | What is blocking it |
-|---|-----|---------|---------------------|
-| 1 | No tax on German shares with no other income | Serious | Needs a decision on how to price it |
-| 2 | Savings counted as profit for the yearly fund charge | Medium | Needs the shared agreement widened |
-| 3 | Input boxes still show £ under Germany | Medium | Small fix, but needs the £5-vs-5 € call |
-| 4 | Unused allowance counted during saving-up years | Medium | Needs a decision on who fixes it |
-| 5 | Pension start-year box shows one year, uses another | Small | Needs the country memory made safe first |
+## The shared "which country are we in" memory is fragile
 
-Everything else the review found is already fixed and tested. All tests pass.
+Surfaced by item 5, and it is worth separating out because it is not really
+about item 5.
+
+The app remembers the active jurisdiction in a single shared spot
+(`convert::active_system()`, a thread-local) that anything can read at any time,
+with nothing guaranteeing it is current when read. **This was introduced in
+Phase C1 and is my responsibility, not the review's.** It was chosen to avoid
+threading a tax-system parameter through about sixty call sites, which was a
+real trade — but it left this edge.
+
+**Partly addressed.** The browser suite no longer depends on it: its `kinds()`
+helper read the thread-local *before* mounting, so once any test switched to
+Germany the next test picked up the German catalogue while mounting a British
+state. It now asks the catalogue for the jurisdiction the tests actually seed,
+which makes the suite order-independent. That was a real latent fault — adding
+one test that switched jurisdiction was enough to break an unrelated one.
+
+**Not addressed.** The underlying weakness stands. It is not a production bug —
+in the browser there is one `App`, and `build_input` sets the value on every
+recomputation — but it is a sharp edge for tests and for any future caller that
+is not `App`. If it trips anyone again, the fix is to make the active system a
+reactive context (as the currency symbol already is) rather than a thread-local.
+
+---
+
+# Summary
+
+| # | Fix | How bad | Blocking decision |
+|---|-----|---------|-------------------|
+| 1 | ~~No tax on German capital~~ | ~~Serious~~ | **Fixed.** Faithful version optional, decide with 4 |
+| 2 | Deposits counted as growth for the fund charge | Medium, bounded | None really — widen `PeriodPot`, 2 files |
+| 3 | ~~Input boxes showed £~~ | ~~Medium~~ | **Fixed.** Sign placement still open |
+| 4 | Unused allowance counted while only saving | Medium, misleads | Who owns it — I suggest `calc` at the handover |
+| 5 | Start-year box shows one year, uses another | Small, latent | None — seed it synchronously |
+
+Everything else the review found is already fixed and tested. Current state:
+calc 88, de-tax 38, uk-tax 36, taxkit 23, app 73, 46 browser tests, the Trunk
+production build, and all four boundary greps — all passing.
