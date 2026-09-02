@@ -1266,3 +1266,33 @@ input[type="number"]::-webkit-inner-spin-button {
     background: rgba(16, 23, 34, 0.42);
   }
 }
+
+/* A jurisdiction's projected glossary panel — prose and a worked example,
+   rather than the term/definition grid above it. */
+.gloss-worked {
+  margin-top: 28px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.gloss-worked h4 {
+  margin: 0 0 10px;
+  font-size: 0.98rem;
+}
+.gloss-worked p {
+  margin: 0 0 10px;
+  max-width: 68ch;
+  color: var(--muted-strong);
+}
+.gloss-worked ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+  max-width: 68ch;
+}
+.gloss-worked li {
+  margin-bottom: 6px;
+}
+.gloss-worked p:last-child {
+  margin-bottom: 0;
+}

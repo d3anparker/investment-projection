@@ -15,7 +15,7 @@ gate. Tick the boxes as they land.
 | --- | --- | --- |
 | **G1** | The contract (`taxkit::GlossaryEntry`) and both jurisdictions' entries. No UI. | ☑ landed |
 | **G2** | The shared app terms, the modal, the button, the mobile-first styling. | ☑ landed |
-| **G3** | Content projection: a jurisdiction may insert its own panel into the modal. | ☐ |
+| **G3** | Content projection: a jurisdiction may insert its own panel into the modal. | ☑ landed |
 | **G4** | Filtering, docs, the two update skills, the CI guard. | ☐ |
 
 ---

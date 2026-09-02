@@ -393,6 +393,13 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
                     open.get()
                         .then(|| {
                             let sys = system();
+                            // Content projection: after the generic term list,
+                            // the jurisdiction may insert whatever a flat list
+                            // cannot say. A jurisdiction with none renders no
+                            // wrapper element at all.
+                            let projected = crate::jurisdiction::from_id(&jurisdiction.get())
+                                .glossary_panel
+                                .map(|panel| panel(crate::jurisdiction::GlossarySlot));
                             view! {
                                 <p class="glossary-intro">
                                     "What the words on this page mean, and how to read the \
@@ -401,6 +408,7 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
                                 </p>
                                 {glossary_view("How this projection works".to_string(), APP_GLOSSARY)}
                                 {glossary_view(format!("{} tax terms", sys.label()), sys.glossary())}
+                                {projected}
                             }
                         })
                 }}

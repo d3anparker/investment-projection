@@ -4,8 +4,8 @@
 //! Each [`Jurisdiction`] pairs a `taxkit::TaxSystem` with optional panel
 //! functions the page mounts at fixed points. A jurisdiction with no bespoke
 //! controls (the UK) leaves them `None` and nothing renders, exactly as before;
-//! Germany fills both. A *per-holding* slot is deliberately absent rather than
-//! stubbed out: nothing needs one yet, and it would want a lifetime on
+//! Germany fills all three. A *per-holding* slot is deliberately absent
+//! rather than stubbed out: nothing needs one yet, and it would want a lifetime on
 //! `taxkit::Pot` — a shape worth designing against a real caller rather than
 //! guessing at, so it arrives with its first user.
 //!
@@ -32,6 +32,14 @@ pub struct Jurisdiction {
     pub settings_panel: Option<fn(SettingsSlot) -> View>,
     /// Explanation of this jurisdiction's own figures, under the output panels.
     pub notes_panel: Option<fn(NotesSlot) -> View>,
+    /// Extra glossary content, projected into the modal after this system's
+    /// term list: prose, a worked example — anything a flat list of
+    /// `taxkit::GlossaryEntry` cannot say.
+    ///
+    /// The term list is the general mechanism and covers every jurisdiction;
+    /// this is the escape hatch for the one whose rules need showing rather
+    /// than defining. `None` renders no wrapper element at all.
+    pub glossary_panel: Option<fn(GlossarySlot) -> View>,
 }
 
 /// What a settings panel is handed: the reactive option map it reads and writes,
@@ -48,6 +56,17 @@ pub struct SettingsSlot {
 #[derive(Clone, Copy)]
 pub struct NotesSlot;
 
+/// What a glossary panel is handed. Nothing yet: it sits inside a modal that
+/// already carries the heading, the scrolling and the close control, so a panel
+/// supplies content and nothing else.
+///
+/// Like every slot it may **not** compute, derive or round a number. A worked
+/// example uses figures written into the panel as illustrations, never figures
+/// taken from the projection — those belong to the output panels, which is
+/// where a reader can see the assumptions behind them.
+#[derive(Clone, Copy)]
+pub struct GlossarySlot;
+
 /// Every jurisdiction the app offers, in picker order. The first is the default.
 pub const JURISDICTIONS: &[Jurisdiction] = &[
     Jurisdiction {
@@ -56,6 +75,7 @@ pub const JURISDICTIONS: &[Jurisdiction] = &[
         system: &uk_tax::UK,
         settings_panel: None,
         notes_panel: None,
+        glossary_panel: None,
     },
     Jurisdiction {
         id: "de",
@@ -63,6 +83,7 @@ pub const JURISDICTIONS: &[Jurisdiction] = &[
         system: &de_tax::DE,
         settings_panel: Some(de::settings),
         notes_panel: Some(de::notes),
+        glossary_panel: Some(de::glossary),
     },
 ];
 
