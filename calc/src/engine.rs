@@ -547,6 +547,11 @@ pub(crate) struct Run {
     pub(crate) depletion_month: Option<u32>,
     pub(crate) accounts_touched: Vec<usize>,
     pub(crate) period_months: Option<u32>,
+    /// Tax-free headroom left unclaimed **across the drawdown only** — the
+    /// accumulation phase's banked allowances are subtracted out here, where the
+    /// phase boundary is known, rather than being read off the session by the
+    /// caller (which cannot tell the two phases apart).
+    pub(crate) unused_allowance: Decimal,
     pub(crate) rate_cap_breached: bool,
 }
 
@@ -559,7 +564,9 @@ pub(crate) struct Run {
 /// cannot run in isolation.
 ///
 /// The `plan` is borrowed mutably so the caller retains its session afterwards
-/// for the unused-allowance and rules-label figures the ledger holds.
+/// for the rules-label figures the ledger holds. The unused-allowance figure is
+/// *not* among them: it has to be measured from the handover, which only this
+/// function knows where to find.
 pub(crate) fn project(
     prepared: &[Prepared],
     horizon_months: u32,
@@ -633,7 +640,18 @@ pub(crate) fn project(
     // A charge is anchored to the start of the projection, because it accrues
     // while accumulating; a pricing-only session (no charge) has no accumulation
     // bookkeeping and keeps the handover as its period anchor, as before.
+    //
+    // The anchor says where the periods *begin*; the handover says where they
+    // *land* — boundaries are counted symmetrically outwards from `horizon`, so
+    // one always falls exactly on the handover whatever the growth period is
+    // (see the boundary test in the loop). For a pricing-only session the two
+    // rules coincide, so nothing about a UK projection moves.
     let anchor = if charging { 0 } else { horizon };
+    // Allowance banked by the end of accumulation, subtracted from the closing
+    // figure so only the drawdown's unclaimed headroom is reported. Captured at
+    // the handover boundary, at the one instant it equals the banked total —
+    // see the capture site.
+    let mut unused_baseline = Decimal::ZERO;
     let mut accounts_touched: Vec<usize> = Vec::new();
     let mut period_kinds: Vec<&str> = Vec::new();
     let mut rate_cap_breached = false;
@@ -705,16 +723,27 @@ pub(crate) fn project(
         // Tax periods are anchored to a projection month, never to a real
         // calendar date: a date would make the projection depend on when it was
         // run, breaking shared links and failing the browser suite every year
-        // boundary, and would manufacture a stub first period carrying a full
-        // year's allowances (they are not pro-rated for part periods).
+        // boundary.
+        //
+        // Boundaries are counted from the *handover*, in both directions, rather
+        // than forwards from the anchor: a period must close exactly at the
+        // handover, or the period straddling it belongs to neither phase and
+        // there is no instant at which the accumulation's banked allowance can
+        // be read off. Where the anchor is the handover (a pricing-only system)
+        // the two formulations are the same expression, so this changes nothing
+        // for a system that does not charge. Where it is month zero, a growth
+        // period that is not a whole number of periods leaves a short *first*
+        // period — deliberately the first, where the pot is smallest, since a
+        // part period is still charged in full (the charge is not pro-rated).
         if let Some(s) = session.as_mut().filter(|_| i >= anchor) {
-            let m = i - anchor;
-            if m == 0 {
+            let on_boundary =
+                (i as i64 - horizon as i64).rem_euclid(period_len as i64) == 0;
+            if i == anchor {
                 if charging {
                     period_opening.copy_from_slice(&balances);
                     period_contrib.copy_from_slice(&contributed);
                 }
-            } else if m % period_len == 0 {
+            } else if on_boundary {
                 // The charge for the period just ended, measured on its opening
                 // values. It posts to the session's own ledger (consuming any
                 // allowance a later draw would have used); here we only deduct it
@@ -748,13 +777,24 @@ pub(crate) fn project(
                     period_opening.copy_from_slice(&balances);
                     period_contrib.copy_from_slice(&contributed);
                 }
+                // The accumulation's banked allowance, read at the only instant
+                // it can be: `unused_allowance` is *banked plus what is left in
+                // the open period*, and `start_period` is about to bank exactly
+                // that remainder. Immediately before it, the two are the same
+                // number. A line earlier — before `period_charge` — the charge's
+                // own consumption of the period's allowance would still be
+                // counted as unclaimed; a line later, the fresh drawdown
+                // period's untouched allowance would be subtracted away.
+                if charging && i == horizon {
+                    unused_baseline = s.unused_allowance();
+                }
                 s.start_period();
                 // Per-period account-touch bookkeeping is a drawdown, net-order
                 // concern only: pro-rata touches nothing tax-ordered, and an
                 // accumulation period draws nothing at all. Strictly `>`: under a
-                // charging system the anchor is month zero, so a boundary can land
-                // *on* the handover, before a single withdrawal — closing a period
-                // there would push an empty count and halve the reported average.
+                // charging system a boundary always lands *on* the handover,
+                // before a single withdrawal — closing a period there would push
+                // an empty count and halve the reported average.
                 if ordered && i > horizon {
                     accounts_touched.push(period_kinds.len());
                     period_kinds.clear();
@@ -849,6 +889,26 @@ pub(crate) fn project(
         accounts_touched.push(period_kinds.len());
     }
 
+    // Unclaimed headroom over the drawdown alone. The session's own figure spans
+    // every period it ever opened, which under a charging system starts at month
+    // zero — banking a full allowance for each accumulation year, when there was
+    // no withdrawal that could have spent it. Subtracting the handover baseline
+    // leaves what a withdrawal order actually left on the table, which is the
+    // only thing this figure is read for.
+    //
+    // A projection that never draws is accumulation all the way to the endpoint,
+    // so its baseline is the closing figure and nothing is reported unclaimed.
+    // The `max` cannot fire while banked allowance is monotone and a period's
+    // remainder is non-negative (the baseline is the banked total at the
+    // handover, so the closing figure is never below it); it is kept because a
+    // negative in a column that means "left on the table" would be read as a
+    // figure rather than as the bug it is.
+    let unused_allowance = session.as_ref().map_or(Decimal::ZERO, |s| {
+        let closing = s.unused_allowance();
+        let baseline = if drawing { unused_baseline } else { closing };
+        (closing - baseline).max(Decimal::ZERO)
+    });
+
     Ok(Run {
         totals,
         contribs,
@@ -869,6 +929,7 @@ pub(crate) fn project(
         depletion_month,
         accounts_touched,
         period_months,
+        unused_allowance,
         rate_cap_breached,
     })
 }
@@ -920,6 +981,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         depletion_month,
         accounts_touched,
         period_months,
+        unused_allowance,
         rate_cap_breached,
     } = project(
         &prepared,
@@ -959,10 +1021,9 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         let periods = accounts_touched.len();
         (total * 2 + periods) / (periods * 2)
     });
-    let unused_allowance_total = plan
-        .session
-        .as_ref()
-        .map_or(Decimal::ZERO, |s| round2(s.unused_allowance()));
+    // Already narrowed to the drawdown by `project` — the only place that knows
+    // where the phases meet — so there is nothing to do here but round it.
+    let unused_allowance_total = round2(unused_allowance);
 
     let results: Vec<InvestmentResult> = prepared
         .iter()

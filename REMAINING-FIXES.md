@@ -1,7 +1,7 @@
 # Still to fix
 
-Five things came out of the code review. **Three are now fixed** (1, 2 and 3);
-two are still open (4 and 5).
+Five things came out of the code review. **Four are now fixed** (1, 2, 3 and 4);
+one is still open (5).
 
 The original numbering is kept so earlier discussion still lines up. Each open
 item now carries what was actually measured and a recommendation, so the
@@ -12,7 +12,7 @@ decision left to you is a genuine choice rather than an open question.
 | 1 | No tax on German capital with no other income | **Fixed** `05ea147` | Optional: model it faithfully |
 | 2 | Deposits counted as growth for the yearly fund charge | **Fixed** (Opus 4.8) | Optional: model the per-share cap |
 | 3 | Input boxes showed £ under Germany | **Fixed** `05ea147` | Optional: decide £5 vs 5 € |
-| 4 | Unused allowance counted during the saving-up years | Open | Decide who owns it — `calc` recommended |
+| 4 | Unused allowance counted during the saving-up years | **Fixed** (Opus 5) | None — both halves done together |
 | 5 | Pension start-year box shows one year, uses another | Open | Seed it synchronously |
 
 ---
@@ -49,6 +49,13 @@ That provenance cuts both ways and you should weigh it accordingly:
   the implementation session's own doing, not a review finding. It is recorded
   there as such rather than being quietly folded into item 5.
 
+**The fix to 4** came from a **third session** (Opus 5), working from the
+repository owner's decision rather than from its own recommendation: it laid out
+the options, the owner chose, and it implemented that choice. Its section is
+appended under item 4 and attributed. It is not the author of the Germany work,
+so it has no homework of its own to mark here — but it did correct one detail of
+the implementation session's Assessment, which is called out in place.
+
 **If you add to this file,** append your own attributed section rather than
 editing an existing Assessment in place. The value here is the record of who
 concluded what, on what evidence — rewriting it in a later voice destroys that.
@@ -63,7 +70,11 @@ with `region: "de_none"`) and:
   `PeriodPot { pot: fonds_aktien available 110000, opening: 100000 }` — a fund
   that fell to 90,000 but received 20,000 of deposits.
 - **Item 4 (€280,308):** call `start_period()` twenty times without drawing
-  anything, then read `unused_allowance()`.
+  anything, then read `unused_allowance()`. Still reproduces, and always will —
+  it is the *session's* figure, and a session is right to bank a year it was
+  offered. What changed is that `calc` no longer reports those years; that is
+  pinned by `calc`'s `an_accumulation_only_projection_claims_no_allowance` and
+  `unused_allowance_counts_only_the_drawdown_years`.
 - **Item 1 (now fixed):** the €500,000-at-€0 case is pinned permanently by
   `de-tax/src/engine.rs`'s `capital_is_taxed_even_when_there_is_no_other_income`.
 
@@ -246,7 +257,13 @@ not German figures.
 Verified: tax crates, `calc` (89), the app wasm compile-check, the headless UI
 suite (54), and all three boundary greps — all green.
 
-## 4. "Unused allowance" counts years you could never have used it
+## 4. "Unused allowance" counts years you could never have used it — fixed
+
+> **Fixed** by a later session (Opus 5), on the repository owner's decision. The
+> finding and the original Assessment are kept intact below; the resolution is
+> appended after them, including one correction to the Assessment's proposed
+> mechanism. Both halves — the counter and the stub year — were done together,
+> because the first turns out to need the second.
 
 **Where:** `calc/src/engine.rs`, the `anchor` line.
 
@@ -299,6 +316,90 @@ properly (item 1), capital income starts consuming the Grundfreibetrag, which
 changes both pension taxation *and* this number. **Items 1 and 4 should be
 decided together**, or the second will silently undo assumptions made in the
 first.
+
+### Resolution — Opus 5 session
+
+Both halves, as decided: **the counter is measured from the handover, and the
+tax periods are aligned so that there is a handover to measure from.** The
+Assessment treated those as separable ("a separate, smaller decision"). They are
+not, and that is the one place this session disagrees with it — see below.
+
+**What changed, and where.**
+
+- **`calc/src/engine.rs`, the boundary test.** Periods were counted forwards
+  from the anchor (`(i - anchor) % period_len`). They are now counted *outwards
+  from the handover*, in both directions:
+  `(i - horizon).rem_euclid(period_len) == 0`. One line, and for a pricing-only
+  system — where the anchor *is* the handover — it is the same expression it
+  replaced, so nothing about a UK projection moves. The symmetric form was
+  chosen over a special-cased extra boundary because it is one uniform rule
+  rather than a rule plus an exception, and because the short period it leaves
+  is the **first** one, where the pot is smallest and a part period charged in
+  full costs least.
+- **`calc/src/engine.rs`, the baseline.** `project` records
+  `unused_allowance()` once, at the handover boundary, and `Run` carries it. The
+  reported figure is the closing figure minus that baseline.
+- **`calc/src/types.rs`.** The field's doc already said "across the drawdown".
+  It now says why that is load-bearing rather than incidental.
+- **The glossary, both jurisdictions.** "Only the years money is being drawn
+  count: a year in which nothing came out had no allowance to leave unclaimed."
+  The old wording was not wrong, but it was the code that disagreed with it.
+
+**Where this corrects the Assessment.** The Assessment's third option — record
+`unused_allowance()` at the handover and report the growth from there — is the
+right shape, and it is what was built. But *the handover* is not the right
+instant, and the two halves are not independent:
+
+- `unused_allowance()` is **banked + what is left in the currently open period**.
+  Subtract it wholesale and you also subtract a full untouched period's
+  allowance that belongs to the drawdown. The correct instant is immediately
+  **before** the handover's `start_period()`, which is about to bank exactly that
+  remainder — at that one moment, the figure equals the banked total. A line
+  earlier and the periodic charge's own consumption of the closing period's
+  allowance is counted as unclaimed; a line later and the fresh drawdown period's
+  full allowance is subtracted away. All three variants look identical at the
+  call site and differ by a year's allowance.
+- That instant **only exists if a period closes at the handover**. With a growth
+  period that is not a whole number of years, the straddling period belongs to
+  neither phase and there is nothing to read. Doing the counter alone would have
+  left the figure quietly undercounting by whatever the first drawdown months
+  spent — a silent wrong number in the column that exists to explain things,
+  which is worse than the loud wrong number it replaced.
+
+**The trade, stated plainly.** Aligning the periods moves German figures for any
+growth period that is not a whole number of years: the charge dates shift, and
+the short first period is charged a full year's Vorabpauschale because the model
+does not pro-rate a part period. That is a small bounded over-charge in the safe
+direction, and it is the price of the column being trustworthy.
+
+**How it is pinned.** Four tests, all against `taxkit`'s fictional systems, so a
+German or UK rate change cannot break them:
+
+- `unused_allowance_counts_only_the_drawdown_years` — under `MOCK_LEVY`, growth
+  periods of 120, 240 and 125 months over the same drawdown all report the same
+  figure, and it is exactly ten drawdown years' allowance.
+- `a_period_closes_exactly_on_the_handover` — a 125-month growth period still
+  levies a charge at month 125, visible in `charged_series`. This is the
+  alignment half on its own.
+- `an_accumulation_only_projection_claims_no_allowance` — nothing drawn, nothing
+  reported.
+- `a_pricing_only_system_measures_its_whole_session` — under plain `MOCK`, the
+  growth period does not move the figure, because every period a pricing-only
+  system runs is a drawdown period. This is the "Britain is unaffected" claim,
+  pinned rather than asserted.
+
+Both alignment-dependent tests were confirmed to **fail** against the old
+forward-anchored boundary before the fix was kept, so neither is inert.
+
+**Not done, and not proposed.** The coupling the Assessment flags stands
+untouched: if the Günstigerprüfung (item 1) is ever modelled, capital income
+starts consuming the Grundfreibetrag and this figure moves with it. The
+mechanism here is indifferent to *what* consumes an allowance, and the tests
+pin fictional figures, so that work does not have to revisit this one.
+
+Verified: `calc` (93), de-tax 44, uk-tax 40, taxkit 23, app 86 native module
+tests, the app wasm compile-check, the headless UI suite (54), and all three
+boundary greps — all green.
 
 ## 5. The "year you start drawing" box shows a year it does not use
 
@@ -374,10 +475,10 @@ reactive context (as the currency symbol already is) rather than a thread-local.
 | 1 | ~~No tax on German capital~~ | ~~Serious~~ | **Fixed.** Faithful version optional, decide with 4 |
 | 2 | ~~Deposits counted as growth for the fund charge~~ | ~~Medium, bounded~~ | **Fixed.** Per-share cap optional, left deliberately |
 | 3 | ~~Input boxes showed £~~ | ~~Medium~~ | **Fixed.** Sign placement still open |
-| 4 | Unused allowance counted while only saving | Medium, misleads | Who owns it — `calc` at the handover is recommended |
+| 4 | ~~Unused allowance counted while only saving~~ | ~~Medium, misleads~~ | **Fixed.** Counter and alignment both done |
 | 5 | Start-year box shows one year, uses another | Small, latent | None — seed it synchronously |
 
 Everything else the review found is already fixed and tested. Current state
-(verified after the item 2 fix): calc 89, de-tax 44, uk-tax 40, taxkit 23, app
+(verified after the item 4 fix): calc 93, de-tax 44, uk-tax 40, taxkit 23, app
 86 native module tests, 54 browser tests, the app wasm compile-check, and all
 three boundary greps — all passing.

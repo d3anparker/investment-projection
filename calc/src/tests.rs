@@ -914,6 +914,33 @@ use crate::types::NEUTRAL_CURRENCY;
     }
 
     #[test]
+    fn a_pricing_only_system_measures_its_whole_session() {
+        // The handover baseline is a *charging* system's problem. A system that
+        // only prices withdrawals opens its first tax period at the handover, so
+        // every period it ever runs is a drawdown period and none is subtracted
+        // out -- which is why the fix for the accumulation years leaves a UK-shaped
+        // projection untouched. With no return and no deposits the pot reaching
+        // the handover is the same whatever the growth period, so the growth
+        // period cannot move the answer; a part-year one included, now that
+        // periods are counted outwards from the handover rather than from month
+        // zero.
+        let run = |grow: &str| {
+            calculate(&strategy_run(
+                mixed_portfolio(),
+                grow,
+                "120",
+                "2000",
+                Strategy::cheapest_first(),
+                Some(taxed("0", "60")),
+            ))
+            .unwrap()
+            .unused_allowance_total
+        };
+        assert!(run("60") > Decimal::ZERO, "the mock system has allowances to leave unclaimed");
+        assert_eq!(run("125"), run("60"), "the growth period is not part of the measurement");
+    }
+
+    #[test]
     fn ordered_empties_each_account_kind_in_turn() {
         let input = strategy_run(
             mixed_portfolio(),
@@ -1731,5 +1758,78 @@ mod levy {
             out.current_total + out.contributed_total - out.withdrawn_total - out.charged_total
                 + out.growth,
         );
+    }
+
+    #[test]
+    fn unused_allowance_counts_only_the_drawdown_years() {
+        // A charging system runs tax periods from month zero, because the charge
+        // accrues while accumulating. That also banks a full allowance for every
+        // accumulation year -- years in which there was no withdrawal that could
+        // possibly have claimed it, and which would swamp the differences between
+        // strategies that this figure exists to explain. Only the drawdown's own
+        // years are reported, so lengthening the growth period cannot move it.
+        //
+        // A plain account is drawn throughout: it neither pays the levy nor
+        // consumes the allowance, so the answer is the whole allowance for each of
+        // the ten drawdown periods -- nine banked at a boundary, the tenth still
+        // open at the endpoint.
+        let run = |grow: &str| {
+            calculate(&strategy_run(
+                vec![account("Cash", PLAIN, "600000", "0", "0")],
+                grow,
+                "120",
+                "1000",
+                Strategy::cheapest_first(),
+                Some(levy_ctx(vec![])),
+            ))
+            .unwrap()
+            .unused_allowance_total
+        };
+        assert_eq!(run("120"), d("10000.00"), "ten drawdown years at 1,000 apiece");
+        assert_eq!(run("240"), run("120"), "twice the growth period, same answer");
+        assert_eq!(run("125"), run("120"), "a growth period of part years, same answer");
+    }
+
+    #[test]
+    fn a_period_closes_exactly_on_the_handover() {
+        // Tax periods are counted outwards from the handover, not forwards from
+        // the anchor, so a growth period that is not a whole number of periods
+        // still closes one and opens another exactly at the handover. Without
+        // that the straddling period belongs to neither phase, and there is no
+        // instant at which the accumulation's banked allowance can be read off --
+        // the figure above would then quietly undercount by whatever the first
+        // drawdown months spent.
+        //
+        // A boundary is visible in the charge: `charged_series[i]` is the state
+        // *before* month `i`'s boundary is worked, so a period closing at the
+        // handover shows up as a rise in the month after it.
+        let out = calculate(&strategy_run(
+            vec![account("Fund", FUND, "300000", "0", "0")],
+            "125",
+            "24",
+            "1000",
+            Strategy::cheapest_first(),
+            Some(levy_ctx(vec![])),
+        ))
+        .unwrap();
+        assert!(
+            out.charged_series[126] > out.charged_series[125],
+            "a period should have closed on the handover: {} then {}",
+            out.charged_series[125],
+            out.charged_series[126],
+        );
+    }
+
+    #[test]
+    fn an_accumulation_only_projection_claims_no_allowance() {
+        // Nothing is ever withdrawn, so no allowance was ever on the table. The
+        // whole projection is accumulation, so the whole of it is the baseline.
+        let out = calculate(&deposits_taxed(
+            vec![account("Fund", FUND, "100000", "0", "0")],
+            "240",
+            levy_ctx(vec![]),
+        ))
+        .unwrap();
+        assert_eq!(out.unused_allowance_total, d("0.00"));
     }
 }

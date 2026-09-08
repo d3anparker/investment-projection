@@ -318,7 +318,9 @@ pub const DE_GLOSSARY: &[GlossaryEntry] = &[
         definition: "Allowance a year offered and the withdrawals did not use. \
                      Yearly allowances do not carry forward, so this is the \
                      column that explains why one way of drawing money down \
-                     costs less tax than another.",
+                     costs less tax than another. Only the years money is \
+                     being drawn count: a year in which nothing came out had \
+                     no allowance to leave unclaimed.",
         seen_in: "The unclaimed-allowance column in the drawdown comparison.",
         topic: topics::INCOME,
         see_also: &["grundfreibetrag", "sparer_pauschbetrag"],

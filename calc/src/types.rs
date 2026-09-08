@@ -365,6 +365,13 @@ pub struct CalcOutput {
     /// The "show your working" figure: it is what explains *why* one withdrawal
     /// order beats another, and it turns a comparison of strategies from a
     /// scoreboard into an explanation.
+    ///
+    /// The drawdown *only* — and that is load-bearing, not incidental. A tax
+    /// system that charges for holding runs tax periods through the growth phase
+    /// too, banking a full allowance for every year in which there was no
+    /// withdrawal that could possibly have spent it. Those years are subtracted
+    /// out, so what is left is what a withdrawal order actually left on the
+    /// table. Zero when nothing is ever drawn.
     pub unused_allowance_total: Decimal,
     /// Months in the tax period `accounts_touched` is bucketed by — a fact
     /// owned by the tax system, so `None` on an untaxed
