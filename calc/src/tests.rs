@@ -1477,7 +1477,7 @@ let row = out.investments[0]
 // can. These are the invariants a *charging* tax system adds.
 mod levy {
     use super::*;
-    use taxkit::mock::{FUND, MOCK_LEVY, PLAIN};
+    use taxkit::mock::{FUND, MOCK_LEVY, OPT_CAP_AT_GROWTH, PLAIN};
 
     /// The shared `taxed` context, pointed at the levying system. Built off it
     /// rather than re-spelled, so a new `TaxContext` field is one edit in this
@@ -1522,6 +1522,38 @@ mod levy {
         assert_eq!(out.investments[1].charged, d("200.00"), "fund carries the whole charge");
         // The charge came out of the pot.
         assert_eq!(out.projected_total, d("199800.00"));
+    }
+
+    #[test]
+    fn deposits_in_the_period_are_not_charged_as_growth() {
+        // Invariant that `PeriodPot::contributed` is plumbed through from the
+        // projection: under a charge that caps at genuine growth, a fund at 0%
+        // return whose only rise is the deposits paid into it has zero growth,
+        // so nothing is charged however large those deposits are. The cash the
+        // holder paid in must not read as a gain the levy bites on.
+        //
+        // `OPT_CAP_AT_GROWTH` is off by default precisely so the other levy
+        // tests (which cap at nothing) keep exercising the uncapped base; this
+        // one switches it on to reach the new code.
+        let input = deposits_taxed(
+            vec![account("Fund", FUND, "100000", "0", "2000")],
+            "24",
+            levy_ctx(vec![opt(OPT_CAP_AT_GROWTH, "true")]),
+        );
+        let out = calculate(&input).unwrap();
+        assert_eq!(
+            out.charged_total,
+            d("0.00"),
+            "a 0%-return fund's deposits are not a taxable gain"
+        );
+        // And the guard is real: without the cap the same fund is charged, so
+        // the zero above is the contribution netting off, not an inert path.
+        let mut uncapped = input.clone();
+        uncapped.tax = Some(levy_ctx(vec![]));
+        assert!(
+            calculate(&uncapped).unwrap().charged_total > d("0.00"),
+            "uncapped, the deposit-swollen value is charged"
+        );
     }
 
     #[test]

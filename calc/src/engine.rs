@@ -615,6 +615,13 @@ pub(crate) fn project(
     // allocations per run for buffers nothing reads.
     let mut period_opening: Vec<Decimal> =
         if charging { balances.clone() } else { Vec::new() };
+    // Cumulative contributions into each holding as the current period opened.
+    // The period's own contributions are `contributed[j] - period_contrib[j]`,
+    // which a growth-capped charge subtracts so the holder's deposits are not
+    // read as a gain. Snapshotted beside `period_opening` at every boundary; no
+    // contributions flow during drawdown, so it stops moving at the handover.
+    let mut period_contrib: Vec<Decimal> =
+        if charging { contributed.clone() } else { Vec::new() };
     let mut period_pots: Vec<PeriodPot> =
         Vec::with_capacity(if charging { n } else { 0 });
     let mut charge_buf: Vec<Decimal> =
@@ -705,6 +712,7 @@ pub(crate) fn project(
             if m == 0 {
                 if charging {
                     period_opening.copy_from_slice(&balances);
+                    period_contrib.copy_from_slice(&contributed);
                 }
             } else if m % period_len == 0 {
                 // The charge for the period just ended, measured on its opening
@@ -718,6 +726,7 @@ pub(crate) fn project(
                         period_pots.push(PeriodPot {
                             pot: Pot { kind, available: balances[j], cost_basis: basis[j] },
                             opening: period_opening[j],
+                            contributed: contributed[j] - period_contrib[j],
                         });
                     }
                     s.period_charge(&period_pots, &mut charge_buf)
@@ -737,6 +746,7 @@ pub(crate) fn project(
                         }
                     }
                     period_opening.copy_from_slice(&balances);
+                    period_contrib.copy_from_slice(&contributed);
                 }
                 s.start_period();
                 // Per-period account-touch bookkeeping is a drawdown, net-order

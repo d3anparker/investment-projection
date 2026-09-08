@@ -217,6 +217,13 @@ pub struct PeriodPot {
     /// Value at the start of the tax period now ending. What a charge on the
     /// period's growth is measured against.
     pub opening: Decimal,
+    /// Paid into this holding during the period now ending. A charge limited to
+    /// the period's *growth* must be able to tell growth apart from the holder's
+    /// own cash: the end value carries both, so without this figure money paid
+    /// in reads as a gain the charge then bites on. Subtracting it leaves the
+    /// genuine rise. Zero for a period with no contributions (all of drawdown,
+    /// and any holding not being topped up).
+    pub contributed: Decimal,
 }
 
 /// The cost of one withdrawal.

@@ -127,7 +127,8 @@ pub fn glossary(_slot: GlossarySlot) -> View {
                 <li>
                     "It is capped at what the fund actually gained. A fund that rose \
                      \u{20ac}400 is charged on \u{20ac}400; a fund that fell is charged \
-                     nothing at all."
+                     nothing at all \u{2014} and money you paid in over the year is not \
+                     a gain, so it does not count."
                 </li>
                 <li>
                     "The Teilfreistellung exempts part of it \u{2014} for an equity fund, \

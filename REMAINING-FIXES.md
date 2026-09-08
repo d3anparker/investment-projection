@@ -1,7 +1,7 @@
 # Still to fix
 
-Five things came out of the code review. **Two are now fixed** (1 and 3); three
-are still open (2, 4 and 5).
+Five things came out of the code review. **Three are now fixed** (1, 2 and 3);
+two are still open (4 and 5).
 
 The original numbering is kept so earlier discussion still lines up. Each open
 item now carries what was actually measured and a recommendation, so the
@@ -10,7 +10,7 @@ decision left to you is a genuine choice rather than an open question.
 | # | Item | State | Next step |
 |---|------|-------|-----------|
 | 1 | No tax on German capital with no other income | **Fixed** `05ea147` | Optional: model it faithfully |
-| 2 | Deposits counted as growth for the yearly fund charge | Open | Widen `PeriodPot` — cheaper than first thought |
+| 2 | Deposits counted as growth for the yearly fund charge | **Fixed** (Opus 4.8) | Optional: model the per-share cap |
 | 3 | Input boxes showed £ under Germany | **Fixed** `05ea147` | Optional: decide £5 vs 5 € |
 | 4 | Unused allowance counted during the saving-up years | Open | Decide who owns it — `calc` recommended |
 | 5 | Pension start-year box shows one year, uses another | Open | Seed it synchronously |
@@ -146,7 +146,12 @@ both.
 
 # Still outstanding
 
-## 2. Germany's yearly fund charge treats your deposits as growth
+## 2. Germany's yearly fund charge treats your deposits as growth — fixed
+
+> **Fixed** by the implementation session (Opus 4.8). The finding and the
+> original Assessment are kept intact below; the resolution is appended after
+> them. The bug recipe (€149.81) is now pinned permanently the other way by
+> `de-tax`'s `deposits_in_the_period_are_not_a_gain_the_charge_can_bite`.
 
 **Where:** `de-tax/src/engine.rs`, the `gain` line in `period_charge`.
 
@@ -188,6 +193,58 @@ admits only the *opposite* error — that the cap under-states during drawdown.
 It should name both directions. Right now the code documents one of its two
 known inaccuracies, which is worse than documenting neither, because it reads as
 though the case has been thought through.
+
+### Resolution — implementation session (Opus 4.8)
+
+Done as recommended, `contributed` only. The `withdrawn` question (raised when
+this was planned) was decided the way the plan argued: **left alone on purpose.**
+
+What changed, and where:
+
+- **`taxkit/src/lib.rs`** — `PeriodPot` gains `pub contributed: Decimal`, "paid
+  into this holding during the period now ending". The doc says *why* it exists
+  in jurisdiction-neutral terms (a growth-capped charge must tell a rise from
+  the holder's own cash), so the neutral contract stays unwarped; the first
+  boundary grep is still clean.
+- **`calc/src/engine.rs`** — one `charging`-gated scratch vector
+  (`period_contrib`) beside `period_opening`, snapshotting each row's cumulative
+  `contributed` at every period open. The period's contribution is
+  `contributed[j] − period_contrib[j]`, written into the pot. Zero cost to an
+  untaxed or UK projection — the vec stays empty, exactly like `period_opening`.
+- **`de-tax/src/engine.rs`** — `gain = available − opening − contributed`. The
+  comment now names **both** inaccuracies, and records that the drawdown
+  under-statement is left deliberately (see the decision below).
+- **`app/src/jurisdiction/de.rs`** — the worked Vorabpauschale example now says
+  money paid in over the year is not a gain, so the user-facing statement is no
+  longer a slight lie.
+
+**The `withdrawn` decision, recorded.** Adding `withdrawn` would have closed the
+opposite (drawdown) direction in the same two files at near-zero marginal cost,
+and the temptation was real. It was declined because it would be a *fidelity*
+claim I cannot back: §18 InvStG caps the Vorabpauschale by the **per-share**
+price movement over the year, and units sold in-year get **no** Vorabpauschale
+at all (their gain is taxed on disposal instead). The current value cap,
+un-corrected for withdrawals, lands nearer that law than a flow-corrected value
+cap would — it is wrong for the wrong reason, but closer to the right number.
+Modelling it faithfully means the per-share cap, which is a separate, larger
+piece of work (and is the "realised-gain cap during drawdown" that
+`de-tax`'s own "does not model" list in `CLAUDE.md` already names). So this fix
+deliberately touches only the accumulation direction, and the `de-tax` comment
+says so at the line.
+
+**How it is pinned.** `de-tax`'s test uses the file's own numbers (fund
+100,000 → 110,000 having received 20,000 of deposits: was €149.81, now €0).
+`calc`'s side needed care — `MOCK_LEVY` caps at *nothing*, so it would have
+accepted the new field and never read it, leaving the plumbing untested against
+the system invariant 14 pins it with. So `MOCK_LEVY` gained an off-by-default
+`OPT_CAP_AT_GROWTH` option; one `calc` test switches it on and asserts a
+deposit-fed 0%-return period is charged nothing (and, without the cap, *is*
+charged — so the zero is the netting-off, not an inert path). Every existing
+levy test is untouched, and the plumbing is pinned against a fictional system,
+not German figures.
+
+Verified: tax crates, `calc` (89), the app wasm compile-check, the headless UI
+suite (54), and all three boundary greps — all green.
 
 ## 4. "Unused allowance" counts years you could never have used it
 
@@ -315,11 +372,12 @@ reactive context (as the currency symbol already is) rather than a thread-local.
 | # | Fix | How bad | Blocking decision |
 |---|-----|---------|-------------------|
 | 1 | ~~No tax on German capital~~ | ~~Serious~~ | **Fixed.** Faithful version optional, decide with 4 |
-| 2 | Deposits counted as growth for the fund charge | Medium, bounded | None really — widen `PeriodPot`, 2 files |
+| 2 | ~~Deposits counted as growth for the fund charge~~ | ~~Medium, bounded~~ | **Fixed.** Per-share cap optional, left deliberately |
 | 3 | ~~Input boxes showed £~~ | ~~Medium~~ | **Fixed.** Sign placement still open |
 | 4 | Unused allowance counted while only saving | Medium, misleads | Who owns it — `calc` at the handover is recommended |
 | 5 | Start-year box shows one year, uses another | Small, latent | None — seed it synchronously |
 
-Everything else the review found is already fixed and tested. Current state:
-calc 88, de-tax 38, uk-tax 36, taxkit 23, app 73, 46 browser tests, the Trunk
-production build, and all four boundary greps — all passing.
+Everything else the review found is already fixed and tested. Current state
+(verified after the item 2 fix): calc 89, de-tax 44, uk-tax 40, taxkit 23, app
+86 native module tests, 54 browser tests, the app wasm compile-check, and all
+three boundary greps — all passing.

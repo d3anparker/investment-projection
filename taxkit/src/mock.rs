@@ -285,6 +285,13 @@ pub const LEVY_ALLOWANCE: i64 = 1_000;
 /// Option ids this system reads off `SessionSpec::options`.
 pub const OPT_JOINT: &str = "joint";
 pub const OPT_COHORT: &str = "cohort";
+/// When `"true"`, the periodic charge caps its base at the period's genuine
+/// growth -- end value minus opening minus the period's contributions -- so a
+/// holding fed by deposits is not charged on cash the holder paid in. Off by
+/// default, so the existing levy tests (which cap at nothing) are untouched;
+/// one `calc` test switches it on to pin that `PeriodPot::contributed` is
+/// plumbed through from the projection.
+pub const OPT_CAP_AT_GROWTH: &str = "cap_at_growth";
 /// A drawdown starting in this cohort year or later has only half its fund
 /// withdrawals taxable -- a stand-in for a cohort-fixed taxable share.
 pub const COHORT_PIVOT: u16 = 2030;
@@ -369,11 +376,13 @@ impl TaxSystem for MockLevySystem {
         };
         let joint = opt(OPT_JOINT) == Some("true");
         let cohort = opt(OPT_COHORT).and_then(|v| v.trim().parse::<u16>().ok());
+        let cap_at_growth = opt(OPT_CAP_AT_GROWTH) == Some("true");
         Ok(Box::new(MockLevySession {
             allowance: Decimal::from(LEVY_ALLOWANCE)
                 * if joint { Decimal::TWO } else { Decimal::ONE },
             cohort,
             used: Decimal::ZERO,
+            cap_at_growth,
             period_tax: Decimal::ZERO,
             banked_unused: Decimal::ZERO,
         }))
@@ -388,6 +397,8 @@ struct MockLevySession {
     cohort: Option<u16>,
     /// Allowance consumed so far this period, by the levy and any withdrawals.
     used: Decimal,
+    /// Cap the periodic charge's base at the period's genuine growth.
+    cap_at_growth: bool,
     period_tax: Decimal,
     banked_unused: Decimal,
 }
@@ -469,7 +480,17 @@ impl TaxSession for MockLevySession {
             if p.pot.kind == FUND {
                 // 2% of the opening value is the taxable base; it runs the free
                 // rung first, then 20%, and consumes the shared allowance.
+                // Under `cap_at_growth` the base is also capped at the period's
+                // genuine rise -- end minus opening minus deposits in -- so a
+                // holding fed by contributions is not charged on the holder's
+                // own cash. Off by default, hence the unconditional 2% otherwise.
                 let base = (p.opening * fraction).max(Decimal::ZERO);
+                let base = if self.cap_at_growth {
+                    let growth = (p.pot.available - p.opening - p.contributed).max(Decimal::ZERO);
+                    base.min(growth)
+                } else {
+                    base
+                };
                 let free = base.min(self.remaining());
                 let taxed = (base - free).max(Decimal::ZERO);
                 let charge = taxed * self.rate();

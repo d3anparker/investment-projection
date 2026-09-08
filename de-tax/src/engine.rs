@@ -420,11 +420,22 @@ impl TaxSession for GermanSession {
                 continue;
             }
             // Basisertrag: 70% of (opening × Basiszins), capped at the period's
-            // actual gain (zero if the fund fell). During drawdown `available` is
-            // post-withdrawal, so this under- rather than over-states the cap — a
-            // documented simplification.
+            // actual gain (zero if the fund fell). Gain is end value minus both
+            // the opening value and the money paid in during the period, so a
+            // holder's own deposits are not mistaken for a rise the charge then
+            // bites on.
+            //
+            // Two inaccuracies remain, in opposite directions, both accepted:
+            //  - During drawdown `available` is post-withdrawal, so withdrawals
+            //    are *not* added back and the cap under-states. This is left
+            //    deliberately: §18 InvStG caps by the per-share price movement
+            //    and gives units sold in-year no Vorabpauschale at all (their
+            //    gain is taxed on disposal instead), so an un-corrected value
+            //    cap lands nearer the law than a flow-corrected one would.
+            //  - The per-share price cap itself is not modelled; the value cap
+            //    is a portfolio-level stand-in for it.
             let basisertrag = (p.opening * basiszins * faktor).max(Decimal::ZERO);
-            let gain = (p.pot.available - p.opening).max(Decimal::ZERO);
+            let gain = (p.pot.available - p.opening - p.contributed).max(Decimal::ZERO);
             let vorab = basisertrag.min(gain);
             if vorab <= Decimal::ZERO {
                 continue;
@@ -480,7 +491,16 @@ mod tests {
     }
 
     fn period_pot(kind: &'static str, available: &str, opening: &str) -> PeriodPot {
-        PeriodPot { pot: pot(kind, available, "0"), opening: d(opening) }
+        PeriodPot { pot: pot(kind, available, "0"), opening: d(opening), contributed: Decimal::ZERO }
+    }
+
+    fn period_pot_paid_in(
+        kind: &'static str,
+        available: &str,
+        opening: &str,
+        contributed: &str,
+    ) -> PeriodPot {
+        PeriodPot { pot: pot(kind, available, "0"), opening: d(opening), contributed: d(contributed) }
     }
 
     // --- capital income (Abgeltungsteuer) ----------------------------------
@@ -614,6 +634,22 @@ mod tests {
         small.period_charge(&[period_pot(ids::FONDS_AKTIEN, "100500", "100000")], &mut cs).unwrap();
         big.period_charge(&[period_pot(ids::FONDS_AKTIEN, "150000", "100000")], &mut cb).unwrap();
         assert!(cs[0] < cb[0], "a small gain caps the charge below a large one");
+    }
+
+    #[test]
+    fn deposits_in_the_period_are_not_a_gain_the_charge_can_bite() {
+        // A fund worth 100,000 received 20,000 of deposits and *fell*, ending at
+        // 110,000. End minus opening alone reads +10,000 and charged it (the old
+        // €149.81 bug); net of the deposits the fund lost 10,000, so the gain cap
+        // is zero and nothing is charged.
+        let mut s = plain("0");
+        let mut charges = [Decimal::ZERO];
+        s.period_charge(
+            &[period_pot_paid_in(ids::FONDS_AKTIEN, "110000", "100000", "20000")],
+            &mut charges,
+        )
+        .unwrap();
+        assert_eq!(charges[0], Decimal::ZERO, "deposits are not a taxable gain");
     }
 
     #[test]
