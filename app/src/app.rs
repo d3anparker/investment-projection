@@ -846,7 +846,6 @@ pub fn App() -> impl IntoView {
                                     .settings_panel
                                     .map(|panel| panel(crate::jurisdiction::SettingsSlot {
                                         options,
-                                        today_year: today.get_value().year,
                                     }))}
                             })}
                         </fieldset>

@@ -45,7 +45,20 @@ pub mod options {
     pub const BASE_YEAR: &str = "base_year";
     pub const BASE_YEAR_LABEL: &str = "Year drawing starts";
     pub const BASE_YEAR_NOTE: &str =
-        "A Rürup pension's taxable share is fixed for life by the year you start drawing it.";
+        "A Rürup pension's taxable share is fixed for life by the year you start drawing it. \
+         Left blank, the year the figures are for is used.";
+
+    /// The year the session falls back to when the box is blank, or holds
+    /// something that is not a year.
+    ///
+    /// Exported so the panel can *show* this year rather than restate it. A
+    /// second spelling of the rule in the app would drift the moment the tables
+    /// move a year, and the box would then advertise a year the sums do not use
+    /// — which is precisely the fault this exists to prevent. [`super::DE`]'s
+    /// `open` reads the same function, so there is one rule in one place.
+    pub const fn base_year_fallback() -> u16 {
+        crate::tables::de_tax_year_of(crate::tables::LATEST.starts)
+    }
 }
 
 fn eur(v: i64) -> Decimal {
@@ -162,7 +175,7 @@ impl TaxSystem for GermanTaxSystem {
         let splitting = spec.option(options::FILING) == Some(options::FILING_JOINT);
         let start_year = spec.option(options::BASE_YEAR)
             .and_then(|v| v.trim().parse::<u16>().ok())
-            .unwrap_or_else(|| de_tax_year_of(tables::LATEST.starts));
+            .unwrap_or_else(options::base_year_fallback);
 
         let rules = tables::LATEST;
         let kirche_bp = Self::kirche_bp(&spec.region);
@@ -604,6 +617,24 @@ mod tests {
         let e = early.draw(&pot(ids::RUERUP, "1000000", "0"), d("30000"), StopAt::Requirement).unwrap();
         let l = late.draw(&pot(ids::RUERUP, "1000000", "0"), d("30000"), StopAt::Requirement).unwrap();
         assert!(l.tax > e.tax, "the later, higher-share cohort pays more: {} vs {}", l.tax, e.tax);
+    }
+
+    #[test]
+    fn the_exported_fallback_year_is_the_one_an_unset_option_uses() {
+        // The app shows `base_year_fallback()` as the box's placeholder — the
+        // year the sums will use if nothing is typed. That is only honest while
+        // it really is that year, so pin it *behaviourally*: an unset option and
+        // an option set to the exported value must price a pension identically.
+        // Comparing the two consts instead would pass even if `open` stopped
+        // reading the function, which is the drift worth catching.
+        let year = options::base_year_fallback().to_string();
+        let mut unset = open("de_none", "0", Some(65), vec![]);
+        let mut spelled = open("de_none", "0", Some(65), vec![(options::BASE_YEAR.into(), year)]);
+        let a = unset.draw(&pot(ids::RUERUP, "1000000", "0"), d("30000"), StopAt::Requirement).unwrap();
+        let b = spelled.draw(&pot(ids::RUERUP, "1000000", "0"), d("30000"), StopAt::Requirement).unwrap();
+        assert_eq!(a.tax, b.tax, "the placeholder must name the year a blank box actually uses");
+        // And it is a real cohort year, not a zero that happens to clamp.
+        assert!(options::base_year_fallback() >= 2000, "a plausible year, not a sentinel");
     }
 
     // --- Vorabpauschale (the periodic charge) ------------------------------

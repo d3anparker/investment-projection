@@ -32,14 +32,18 @@ fn set(options: Options, id: &'static str, ev: &web_sys::Event) {
 /// year drawing starts (which fixes a Rürup pension's cohort taxable share).
 pub fn settings(slot: SettingsSlot) -> View {
     let options = slot.options;
-    let default_year = slot.today_year.to_string();
-    let year_value = move || {
-        options.with(|m| {
-            m.get(de_opts::BASE_YEAR)
-                .cloned()
-                .unwrap_or_else(|| default_year.clone())
-        })
-    };
+    // The box shows a year only once one has been *chosen*. Unset it stays
+    // empty, and the year the projection will actually use is the placeholder.
+    //
+    // A default filled in here would be displayed without being handed over —
+    // the box naming one year while the sums used another, which is exactly what
+    // this control used to do. Nor is there a good default to fill in: the year
+    // drawing started is a fact about the holder, and may sit in the past.
+    // Asking `de-tax` for the placeholder rather than spelling the fallback out
+    // again is what keeps the two from drifting apart.
+    let year_value =
+        move || options.with(|m| m.get(de_opts::BASE_YEAR).cloned().unwrap_or_default());
+    let year_placeholder = de_opts::base_year_fallback().to_string();
 
     view! {
         <div class="system-options">
@@ -65,6 +69,7 @@ pub fn settings(slot: SettingsSlot) -> View {
                 <input
                     type="number"
                     inputmode="numeric"
+                    placeholder=year_placeholder
                     prop:value=year_value
                     on:change=move |ev| set(options, de_opts::BASE_YEAR, &ev)
                 />

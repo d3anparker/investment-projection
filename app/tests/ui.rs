@@ -879,6 +879,43 @@ async fn the_german_settings_panel_mounts_only_under_germany() {
 }
 
 #[wasm_bindgen_test]
+async fn a_year_control_displays_nothing_that_was_not_chosen() {
+    // The panel's year box used to show the current year as a suggestion without
+    // handing it to the projection, so the box named one year while the sums used
+    // another. It now shows a year only once one has been chosen, and offers the
+    // year that *would* be used as a placeholder — so what is displayed and what
+    // is used cannot disagree.
+    //
+    // Asserted as a property of the control, not against a written-out year: the
+    // placeholder's *value* is the tax crate's to state and is pinned there, by
+    // `de-tax`'s `the_exported_fallback_year_is_the_one_an_unset_option_uses`.
+    let rows = || vec![row("Depot", "100000", "5", "0")];
+    let root = harness::mount_with(&de_state(rows(), "cheapest"));
+    harness::settle().await;
+
+    let year: web_sys::HtmlInputElement = harness::q(&root, ".system-options input[type=number]")
+        .dyn_into()
+        .unwrap();
+    assert_eq!(year.value(), "", "nothing chosen, so nothing displayed");
+    let hint = year.get_attribute("placeholder").unwrap_or_default();
+    assert!(
+        hint.parse::<u16>().is_ok_and(|y| y >= 2000),
+        "an unset box still names the year it will fall back to, got {hint:?}"
+    );
+
+    // A year that *was* chosen is displayed, and is the one the box shows -- the
+    // blank state is the absence of a choice, not a control that ignores its map.
+    let mut chosen = de_state(rows(), "cheapest");
+    chosen.options.insert("base_year".into(), "2024".into());
+    let root = harness::mount_with(&chosen);
+    harness::settle().await;
+    let year: web_sys::HtmlInputElement = harness::q(&root, ".system-options input[type=number]")
+        .dyn_into()
+        .unwrap();
+    assert_eq!(year.value(), "2024", "a chosen year is shown, past years included");
+}
+
+#[wasm_bindgen_test]
 async fn a_charging_system_keeps_its_tax_details_under_pro_rata() {
     // The UK withholds the tax context from pro-rata because pro-rata genuinely
     // ignores tax. Germany also charges for *holding*, and that charge lands

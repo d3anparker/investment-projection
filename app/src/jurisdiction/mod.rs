@@ -42,13 +42,17 @@ pub struct Jurisdiction {
     pub glossary_panel: Option<fn(GlossarySlot) -> View>,
 }
 
-/// What a settings panel is handed: the reactive option map it reads and writes,
-/// and the current calendar year for any "year" default. Passing one bundle
-/// means adding a control never changes the shared signature.
+/// What a settings panel is handed: the reactive option map it reads and writes.
+/// Passing one bundle means adding a control never changes the shared signature.
+///
+/// It carries **no clock**, deliberately. A panel that defaults a control to the
+/// current year displays a value it has not handed to the tax system, so the box
+/// names one year while the sums use another — and a jurisdiction's own fallback
+/// is the jurisdiction's to state, not the app's to guess at. A panel that wants
+/// to *show* such a fallback asks its tax crate for it.
 #[derive(Clone, Copy)]
 pub struct SettingsSlot {
     pub options: RwSignal<BTreeMap<String, String>>,
-    pub today_year: u16,
 }
 
 /// What a notes panel is handed. Currently nothing — the German notes are
