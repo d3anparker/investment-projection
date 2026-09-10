@@ -31,11 +31,12 @@ pub enum GoalKind {
 }
 
 impl GoalKind {
-    /// Resolve the kind `<select>`'s value within `plan` (`"drawdown"` or, by
-    /// default, deposits). A value that doesn't belong to the current mode maps to
-    /// that mode's default, so switching mode never leaves a stale kind selected.
+    /// Resolve the kind `<select>`'s value within `plan` (a `convert::Mode` id;
+    /// both drawing modes offer the drawdown questions, anything else the deposits
+    /// ones). A value that doesn't belong to the current mode maps to that mode's
+    /// default, so switching mode never leaves a stale kind selected.
     pub fn parse(kind: &str, plan: &str) -> GoalKind {
-        let drawdown = plan == "drawdown";
+        let drawdown = crate::convert::Mode::from_id(plan).draws_down();
         match kind {
             "time" if !drawdown => GoalKind::Time,
             "lasts" if drawdown => GoalKind::Lasts,
@@ -138,6 +139,10 @@ mod tests {
         assert_eq!(GoalKind::parse("lasts", "drawdown"), GoalKind::Lasts);
         assert_eq!(GoalKind::parse("topup", "drawdown"), GoalKind::Withdrawal);
         assert_eq!(GoalKind::parse("", "drawdown"), GoalKind::Withdrawal);
+        // Already drawing offers the drawdown questions, never a top-up.
+        assert_eq!(GoalKind::parse("withdrawal", "already-drawing"), GoalKind::Withdrawal);
+        assert_eq!(GoalKind::parse("lasts", "already-drawing"), GoalKind::Lasts);
+        assert_eq!(GoalKind::parse("topup", "already-drawing"), GoalKind::Withdrawal);
     }
 
     #[test]

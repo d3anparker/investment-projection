@@ -30,13 +30,22 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
 
     // In drawdown mode, the pot at the start of drawdown is the figure the whole
     // second phase draws from — shown so a falling final value still reconciles.
-    let handover_stat = out.handover_total.map(|pot| {
+    // Suppressed, not relabelled, when there is no growth phase: the handover is
+    // then today, and the card would only repeat the value-today figure. Gated on
+    // the figure rather than the mode, so a zero typed into the growth box reads
+    // right too.
+    let from_today = out.handover_total.is_some() && horizon == 0;
+    let handover_stat = out.handover_total.filter(|_| horizon > 0).map(|pot| {
         view! {
             <div class="stat">
                 <span class="stat-label">{format!("After {} of growth", horizon_label(horizon))}</span>
                 <span class="stat-value">{fmt_money(pot)}</span>
             </div>
         }
+    });
+    // The cue that replaces it: this drawdown starts from today's value.
+    let from_today_note = from_today.then(|| view! {
+        <span class="stat-note">"drawing down from today"</span>
     });
 
     // Only surface deposits when there actually are some, so a portfolio without
@@ -126,6 +135,7 @@ fn summary_view(out: &CalcOutput) -> impl IntoView {
             <div class="stat">
                 <span class="stat-label">"Value today"</span>
                 <span class="stat-value">{fmt_money(out.current_total)}</span>
+                {from_today_note}
             </div>
             {handover_stat}
             {contributions_stat}

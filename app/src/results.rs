@@ -34,7 +34,13 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
     let drawdown = out.drawdown_months;
     let span = out.total_months; // the whole timeline the chart and scrubber cover
     let drawing = out.handover_total.is_some();
-    let handover = drawing.then_some(horizon);
+    // A drawdown with no growth phase hands over at month zero: there is no
+    // divider to draw, no "at start of drawdown" column worth its width (it would
+    // repeat "value today"), and the growth clause drops out of the wording. Keyed
+    // on the figure, not the mode, so a zero typed into the growth box reads right.
+    let has_handover = drawing && horizon > 0;
+    let from_today = drawing && horizon == 0;
+    let handover = has_handover.then_some(horizon);
     let svg = chart_svg(&out.series, &out.contributions_series, handover);
     let has_contributions = !out.contributed_total.is_zero();
     let has_withdrawals = !out.withdrawn_total.is_zero();
@@ -139,7 +145,14 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             PLOT_BOTTOM_FRAC * 100.0
         )
     };
-    let chart_label = if drawing {
+    let chart_label = if from_today {
+        format!(
+            "Line chart of projected portfolio value, drawn down from {} today to {} over {}.",
+            fmt_money(out.current_total),
+            fmt_money(out.projected_total),
+            horizon_label(drawdown),
+        )
+    } else if drawing {
         format!(
             "Line chart of projected portfolio value over {}: growing to {} after {}, \
              then drawn down to {} over a further {}.",
@@ -182,7 +195,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                 };
                 view! { <td class="num">{cell}</td> }
             });
-            let handover_cell = drawing.then(|| {
+            let handover_cell = has_handover.then(|| {
                 let cell = r.handover_value.map_or("\u{2014}".to_string(), fmt_money);
                 view! { <td class="num">{cell}</td> }
             });
@@ -244,7 +257,9 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
         "Per holding. \u{201c}Annualised\u{201d} is the equivalent yearly rate, projected forward \
          from each holding\u{2019}s value today."
     };
-    let caption_label = if drawing {
+    let caption_label = if from_today {
+        format!("Portfolio value over {} of drawdown, starting today.", horizon_label(drawdown))
+    } else if drawing {
         format!("Portfolio value over {} \u{2014} {} of growth, then {} of drawdown.",
             horizon_label(span), horizon_label(horizon), horizon_label(drawdown))
     } else if has_contributions {
@@ -305,7 +320,7 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
                         {has_contributions.then(|| view! {
                             <th scope="col">{format!("Deposits over {}", horizon_label(horizon))}</th>
                         })}
-                        {drawing.then(|| view! {
+                        {has_handover.then(|| view! {
                             <th scope="col">"At start of drawdown"</th>
                         })}
                         {has_withdrawals.then(|| view! {

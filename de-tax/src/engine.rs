@@ -44,9 +44,20 @@ pub mod options {
 
     pub const BASE_YEAR: &str = "base_year";
     pub const BASE_YEAR_LABEL: &str = "Year drawing starts";
+    /// The same control asked as a past question, for a holder who is already
+    /// drawing. The app chooses between the two labels; both are worded here so
+    /// the words stay with the rule they describe.
+    pub const BASE_YEAR_LABEL_STARTED: &str = "Year drawing started";
     pub const BASE_YEAR_NOTE: &str =
         "A Rürup pension's taxable share is fixed for life by the year you start drawing it. \
          Left blank, the year the figures are for is used.";
+    /// Shown only to a holder who is already drawing. A blank box then falls
+    /// back to the tables' year, which is a *later* cohort than theirs and so
+    /// over-states the taxable share — the safe direction, but one worth
+    /// prompting for rather than merely permitting. Descriptive, not advisory.
+    pub const BASE_YEAR_STARTED_NOTE: &str =
+        "Already drawing a Rürup pension? Enter the year you started: left blank, the taxable \
+         share of a later year is used, which over-states the tax on a pension that began earlier.";
 
     /// The year the session falls back to when the box is blank, or holds
     /// something that is not a year.

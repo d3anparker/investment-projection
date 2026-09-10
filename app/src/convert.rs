@@ -77,7 +77,7 @@ pub struct FormInput {
     pub rows: Vec<RowData>,
     pub horizon_value: String,
     pub horizon_unit: String,
-    /// `"deposits"` or `"drawdown"` — the top-level mode.
+    /// The top-level mode, as a [`Mode`] id. Anything unrecognised is deposits.
     pub plan: String,
     pub drawdown_value: String,
     pub drawdown_unit: String,
@@ -107,16 +107,29 @@ pub struct FormInput {
 pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
     // Point the resolvers and the render at the form's jurisdiction first.
     set_active_system(crate::jurisdiction::system_from(&f.jurisdiction));
+    let mode = Mode::from_id(&f.plan);
+    // With no growth phase there is no month in which a deposit could be paid,
+    // so the per-row deposit box is hidden — and a hidden control must not reach
+    // `calc`: a stale, invalid string there would flag a box the user cannot
+    // see, and a stale value would keep an otherwise-blank row alive below.
+    let contribution_of = |r: &RowData| {
+        if mode.has_growth_phase() {
+            blank_zero(&r.contribution)
+        } else {
+            "0".to_string()
+        }
+    };
     let mut row_ids = Vec::new();
     let investments: Vec<InvestmentInput> = f
         .rows
         .iter()
         .filter_map(|r| {
             // Skip blank rows so a half-typed row doesn't error the form. A row
-            // counts as present if it has *any* of value/rate/contribution.
+            // counts as present if it has *any* of value/rate/contribution — the
+            // contribution only while the mode shows a box for it.
             if r.value.trim().is_empty()
                 && r.rate.trim().is_empty()
-                && r.contribution.trim().is_empty()
+                && (r.contribution.trim().is_empty() || !mode.has_growth_phase())
             {
                 return None;
             }
@@ -129,7 +142,7 @@ pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
                 },
                 value: blank_zero(&r.value),
                 rate: blank_zero(&r.rate),
-                contribution: blank_zero(&r.contribution),
+                contribution: contribution_of(r),
                 account_kind: kind_from(&r.account_kind),
                 // Left exactly as typed: `calc` reads a blank as "today's
                 // value", which is not the same thing as zero.
@@ -140,7 +153,7 @@ pub fn build_input(f: &FormInput) -> (CalcInput, Vec<usize>) {
 
     let input = CalcInput {
         investments,
-        horizon_value: blank_zero(&f.horizon_value),
+        horizon_value: horizon_from(f),
         horizon_unit: unit_from(&f.horizon_unit),
         plan: plan_from(f),
         // `calc` prints whatever symbol it is handed, in taxed and untaxed modes
@@ -161,6 +174,24 @@ pub fn blank_zero(s: &str) -> String {
     }
 }
 
+/// The growth period `calc` is handed, which depends on the mode.
+///
+/// Three modes, three rules — deliberately not one `blank_zero`. **Deposits:** a
+/// blank is `"0"`, and `calc`'s 1-month floor names the box. **Drawdown:** a
+/// blank passes through *as a blank*, and `calc` asks for a period. Zero is a
+/// legal drawdown horizon, so reading a blank as zero here would silently flip
+/// the projection to a same-day drawdown while the growth box sits empty on
+/// screen; a typed `0` still means exactly that. **Already drawing:** always
+/// `"0"`, whatever the (hidden) box holds — the growth phase is the concept this
+/// mode removes, so no control decides it.
+pub fn horizon_from(f: &FormInput) -> String {
+    match Mode::from_id(&f.plan) {
+        Mode::Deposits => blank_zero(&f.horizon_value),
+        Mode::Drawdown => f.horizon_value.clone(),
+        Mode::AlreadyDrawing => "0".to_string(),
+    }
+}
+
 /// A period unit `<select>`'s string value → `calc::Unit`. Anything other than
 /// `"months"` is years (the default option).
 pub fn unit_from(s: &str) -> Unit {
@@ -171,11 +202,79 @@ pub fn unit_from(s: &str) -> Unit {
     }
 }
 
-/// The top-level mode → `calc::Plan`. Anything other than `"drawdown"` (including
-/// a blank from a pre-mode shared link) is the deposits default, so the drawdown
-/// period and withdrawal are only read when actually drawing down.
+/// The top-level mode, as **one** catalogue — the same discipline as
+/// [`StrategyChoice`]. Three modes on screen, two `calc::Plan`s underneath:
+/// *already drawing* is a drawdown whose growth phase is zero months long. That
+/// distinction is presentation (which controls show, what the words say), so it
+/// lives here and never enters `calc`, which merely allows a zero horizon while
+/// drawing down.
+///
+/// Every place that asks "does this mode draw down?" goes through
+/// [`draws_down`](Self::draws_down) — `plan_from`, `tax_context`,
+/// `goal::GoalKind::parse` and the `App` gates alike. A second string comparison
+/// anywhere is a bug waiting to recur: `tax_context` once tested
+/// `plan == "drawdown"` by hand, and a third mode would have silently projected
+/// an ordered strategy untaxed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Grow the holdings over the horizon, adding deposits. The default.
+    Deposits,
+    /// Grow, hand over, then draw the projected pot down.
+    Drawdown,
+    /// Already drawing: no growth phase, the handover is today.
+    AlreadyDrawing,
+}
+
+impl Mode {
+    /// The catalogue in presentation order — the order the radio group renders.
+    pub const ALL: [Mode; 3] = [Mode::Deposits, Mode::Drawdown, Mode::AlreadyDrawing];
+
+    /// The id carried in the form state and the shareable link.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Mode::Deposits => "deposits",
+            Mode::Drawdown => "drawdown",
+            Mode::AlreadyDrawing => "already-drawing",
+        }
+    }
+
+    /// Resolve a stored id. Blank (a pre-mode link) and anything unknown (a
+    /// newer build's mode) fall back to deposits, so the link still opens.
+    pub fn from_id(id: &str) -> Mode {
+        Mode::ALL.into_iter().find(|m| m.id() == id).unwrap_or(Mode::Deposits)
+    }
+
+    /// The radio's visible label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Mode::Deposits => "Building it up",
+            Mode::Drawdown => "Drawing it down",
+            Mode::AlreadyDrawing => "Already drawing it down",
+        }
+    }
+
+    /// Does the projection have a drawdown phase? Gates every drawdown control
+    /// — the periods, the account picker, the tax fieldset, the goal set — and
+    /// which `calc::Plan` is built.
+    pub const fn draws_down(self) -> bool {
+        !matches!(self, Mode::Deposits)
+    }
+
+    /// Does the projection have a growth phase? False only when already
+    /// drawing: the growth-period row and the per-row deposit box are hidden,
+    /// and `calc` is handed a zero horizon.
+    pub const fn has_growth_phase(self) -> bool {
+        !matches!(self, Mode::AlreadyDrawing)
+    }
+}
+
+/// The top-level mode → `calc::Plan`. Both drawing modes build a
+/// `Plan::Drawdown` (already-drawing differs only in the horizon `build_input`
+/// hands over); anything else, including a blank from a pre-mode shared link, is
+/// the deposits default, so the drawdown period and withdrawal are only read
+/// when actually drawing down.
 pub fn plan_from(f: &FormInput) -> Plan {
-    if f.plan == "drawdown" {
+    if Mode::from_id(&f.plan).draws_down() {
         Plan::Drawdown {
             drawdown_value: blank_zero(&f.drawdown_value),
             drawdown_unit: unit_from(&f.drawdown_unit),
@@ -363,7 +462,7 @@ pub fn tax_from(f: &FormInput) -> Option<TaxContext> {
 /// inverts — its whole job is to show what the *other* orders would do, so it
 /// asks for the context directly.
 pub fn tax_context(f: &FormInput) -> Option<TaxContext> {
-    if f.plan != "drawdown" {
+    if !Mode::from_id(&f.plan).draws_down() {
         return None;
     }
     Some(TaxContext {
@@ -449,6 +548,72 @@ mod tests {
             let f = FormInput { plan: mode.into(), ..form(vec![], "10", "years") };
             assert!(plan_from(&f) == Plan::Deposits, "{mode}");
         }
+    }
+
+    #[test]
+    fn every_mode_id_round_trips_and_unknowns_are_deposits() {
+        for mode in Mode::ALL {
+            assert_eq!(Mode::from_id(mode.id()), mode, "{}", mode.id());
+        }
+        assert_eq!(Mode::from_id(""), Mode::Deposits);
+        assert_eq!(Mode::from_id("nonsense"), Mode::Deposits);
+        // The two axes the app gates on.
+        assert!(!Mode::Deposits.draws_down() && Mode::Deposits.has_growth_phase());
+        assert!(Mode::Drawdown.draws_down() && Mode::Drawdown.has_growth_phase());
+        assert!(Mode::AlreadyDrawing.draws_down() && !Mode::AlreadyDrawing.has_growth_phase());
+    }
+
+    #[test]
+    fn already_drawing_is_a_drawdown_with_the_horizon_forced_to_zero() {
+        // The concept is presentation: `calc` sees an ordinary drawdown whose
+        // growth phase is zero months long, whatever the (hidden) growth box says.
+        let mut f = form(vec![row(0, "A", "1000", "7", "50")], "10", "years");
+        f.plan = Mode::AlreadyDrawing.id().into();
+        f.withdrawal = "2000".into();
+        let (input, _) = build_input(&f);
+        assert_eq!(input.horizon_value, "0");
+        assert!(matches!(input.plan, Plan::Drawdown { ref withdrawal, .. } if withdrawal == "2000"));
+        // The hidden deposit box never reaches `calc` either.
+        assert_eq!(input.investments[0].contribution, "0");
+    }
+
+    #[test]
+    fn a_hidden_deposit_neither_errors_nor_keeps_a_row_alive() {
+        let mut f = form(vec![row(0, "A", "1000", "7", "not a number"), row(1, "", "", "", "50")], "10", "years");
+        f.plan = Mode::AlreadyDrawing.id().into();
+        let (input, ids) = build_input(&f);
+        assert_eq!(ids, vec![0], "a row with only a stale deposit is blank when the box is hidden");
+        assert_eq!(input.investments[0].contribution, "0", "a stale invalid deposit is not sent");
+        // In a mode that shows the box, both behave as before.
+        f.plan = Mode::Drawdown.id().into();
+        let (input, ids) = build_input(&f);
+        assert_eq!(ids, vec![0, 1]);
+        assert_eq!(input.investments[0].contribution, "not a number");
+    }
+
+    #[test]
+    fn the_growth_box_is_read_differently_per_mode() {
+        // Deposits: blank is zero, and calc's floor names the box. Drawdown: a
+        // blank passes through so calc asks for a period rather than silently
+        // starting the drawdown today. Already drawing: zero regardless.
+        let blank = |mode: Mode| FormInput { plan: mode.id().into(), ..form(vec![], "  ", "years") };
+        assert_eq!(horizon_from(&blank(Mode::Deposits)), "0");
+        assert_eq!(horizon_from(&blank(Mode::Drawdown)), "  ");
+        assert_eq!(horizon_from(&blank(Mode::AlreadyDrawing)), "0");
+        let typed = |mode: Mode| FormInput { plan: mode.id().into(), ..form(vec![], "0", "years") };
+        assert_eq!(horizon_from(&typed(Mode::Drawdown)), "0", "a typed zero is a typed zero");
+        let ten = FormInput { plan: Mode::AlreadyDrawing.id().into(), ..form(vec![], "10", "years") };
+        assert_eq!(horizon_from(&ten), "0", "the hidden box does not decide the horizon");
+    }
+
+    #[test]
+    fn a_taxed_context_survives_the_already_drawing_mode() {
+        // The bug this catalogue exists to prevent: `tax_context` used to test the
+        // mode string by hand, and a third drawing mode would have projected an
+        // ordered strategy untaxed.
+        let f = FormInput { plan: Mode::AlreadyDrawing.id().into(), ..drawing("2000", StrategyChoice::Cheapest.id()) };
+        assert!(tax_from(&f).is_some(), "an ordered strategy is priced while already drawing");
+        assert!(tax_context(&f).is_some());
     }
 
     #[test]

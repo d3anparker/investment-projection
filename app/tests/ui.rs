@@ -1132,6 +1132,135 @@ async fn the_glossary_holds_no_fragment_links() {
 }
 
 // =====================================================================
+// Already drawing — a drawdown with no growth phase
+// =====================================================================
+
+/// A state seeded in the already-drawing mode. The growth box is seeded too, to
+/// pin that the hidden control does not decide the horizon.
+fn already_drawing_state(rows: Vec<RowData>) -> ShareState {
+    let mut s = state_of(rows, "10", "years");
+    s.plan = "already-drawing".into();
+    s.drawdown_value = "20".into();
+    s.drawdown_unit = "years".into();
+    s.withdrawal = "1500".into();
+    s
+}
+
+#[wasm_bindgen_test]
+async fn already_drawing_removes_the_growth_phase_from_the_page() {
+    // No growth period control, no deposit box, no handover card or column, no
+    // phase divider on the chart — and the seeded deposit is not paid in.
+    let root = harness::mount_with(&already_drawing_state(vec![row("Fund", "300000", "5", "200")]));
+    harness::settle().await;
+
+    assert!(harness::q_opt(&root, "#horizon-value").is_none(), "no growth period to enter");
+    assert!(harness::q_opt(&root, "#drawdown-value").is_some());
+    assert!(harness::q_opt(&root, "#withdrawal").is_some());
+    assert!(
+        !harness::any_text(&root, ".inv-row .fld-lbl", "Monthly deposit"),
+        "a deposit box would be a control the projection ignores"
+    );
+    assert!(!harness::any_text(&root, ".summary .stat-label", "of growth"), "no handover card");
+    assert!(!harness::any_text(&root, ".summary .stat-label", "Added over"), "the seeded deposit is not paid");
+    assert!(harness::any_text(&root, ".summary .stat-note", "drawing down from today"));
+    assert!(!harness::any_text(&root, ".breakdown th", "At start of drawdown"), "no handover column");
+    assert!(!harness::any_text(&root, ".chart text", "drawdown"), "no phase divider on the chart");
+    assert_eq!(harness::text(&root, ".periods label[for=drawdown-value]"), "Draw down for");
+    assert!(harness::q_opt(&root, ".error-msg").is_none());
+}
+
+#[wasm_bindgen_test]
+async fn switching_to_already_drawing_and_back_restores_the_growth_box() {
+    // The growth row is gated on the growth phase, not the mode: it leaves when
+    // already drawing and comes back, value intact, on the way out. The `min`
+    // follows calc's floor — zero is legal while drawing down.
+    let root = harness::mount_with(&ShareState::example());
+    harness::click(&harness::q(&root, "#mode-already-drawing"));
+    harness::settle().await;
+    assert!(harness::q_opt(&root, "#horizon-value").is_none());
+    assert!(harness::q_opt(&root, "#drawdown-value").is_some());
+
+    harness::click(&harness::q(&root, "#mode-drawdown"));
+    harness::settle().await;
+    let horizon = harness::input_by_id(&root, "horizon-value");
+    assert_eq!(horizon.value(), "10", "the growth box returns with its value");
+    assert_eq!(horizon.get_attribute("min").as_deref(), Some("0"));
+
+    harness::click(&harness::q(&root, "#mode-deposits"));
+    harness::settle().await;
+    let horizon = harness::input_by_id(&root, "horizon-value");
+    assert_eq!(horizon.get_attribute("min").as_deref(), Some("1"));
+    // Exactly one radio is checked at any time.
+    let checked = harness::qa(&root, ".segmented input:checked");
+    assert_eq!(checked.len(), 1);
+}
+
+#[wasm_bindgen_test]
+async fn a_zero_growth_box_in_drawdown_mode_projects_from_today() {
+    // Hand-typed zero in plain drawdown mode is the same projection, and reads
+    // the same — the suppression keys on the figure, not the mode.
+    let mut s = state_of(vec![row("Fund", "300000", "5", "0")], "0", "years");
+    s.plan = "drawdown".into();
+    s.drawdown_value = "20".into();
+    s.drawdown_unit = "years".into();
+    s.withdrawal = "1500".into();
+    let root = harness::mount_with(&s);
+    harness::settle().await;
+    assert!(harness::q_opt(&root, ".error-msg").is_none(), "zero is legal while drawing down");
+    assert!(!harness::any_text(&root, ".summary .stat-label", "of growth"));
+    assert!(harness::any_text(&root, ".summary .stat-note", "drawing down from today"));
+    assert!(!harness::any_text(&root, ".breakdown th", "At start of drawdown"));
+}
+
+#[wasm_bindgen_test]
+async fn a_blank_growth_box_in_drawdown_mode_asks_for_a_period() {
+    // Now that zero is legal, a blank must not silently *mean* zero: clearing the
+    // box is an error naming the box, not a projection that starts today.
+    let root = harness::mount_with(&ShareState::example());
+    harness::click(&harness::q(&root, "#mode-drawdown"));
+    harness::settle().await;
+    let horizon = harness::input_by_id(&root, "horizon-value");
+    harness::type_into(&horizon, "").await;
+    assert_eq!(horizon.get_attribute("aria-invalid").as_deref(), Some("true"));
+    assert!(harness::text(&root, ".error-msg").contains("Enter a growth period"));
+}
+
+#[wasm_bindgen_test]
+async fn already_drawing_keeps_the_drawdown_goals_and_the_tax_context() {
+    // The gates that used to compare the mode string by hand: the goal set, the
+    // tax controls and the tax context itself all treat the new mode as drawing.
+    let mut s = taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest");
+    s.plan = "already-drawing".into();
+    let root = harness::mount_with(&s);
+    harness::settle().await;
+    assert!(harness::text_of(&harness::q(&root, ".goal select")).contains("monthly withdrawal I can afford"));
+    assert!(harness::q_opt(&root, ".tax-settings").is_some());
+    assert!(harness::q_opt(&root, "#other-income").is_some(), "an ordered strategy still asks for tax details");
+    assert_eq!(harness::text(&root, "label[for=age]"), "Age now");
+    let line = harness::text(&root, ".tax-asof");
+    assert!(
+        line.contains(seeded_system().rules_label()),
+        "the tax context survived the third mode: {line}"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn the_german_year_control_asks_a_past_question_when_already_drawing() {
+    let rows = || vec![row("Depot", "100000", "5", "0")];
+    let mut s = de_state(rows(), "cheapest");
+    s.plan = "already-drawing".into();
+    let already = harness::mount_with(&s);
+    harness::settle().await;
+    assert!(harness::any_text(&already, ".system-options .fld-lbl", "Year drawing started"));
+    assert!(harness::q_opt(&already, ".system-options-prompt").is_some(), "and it prompts for the year");
+
+    let planning = harness::mount_with(&de_state(rows(), "cheapest"));
+    harness::settle().await;
+    assert!(harness::any_text(&planning, ".system-options .fld-lbl", "Year drawing starts"));
+    assert!(harness::q_opt(&planning, ".system-options-prompt").is_none());
+}
+
+// =====================================================================
 // Harness
 // =====================================================================
 

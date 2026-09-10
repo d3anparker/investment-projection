@@ -1098,6 +1098,11 @@ input[type="number"]::-webkit-inner-spin-button {
   color: var(--muted);
   line-height: 1.4;
 }
+/* A note that asks for something rather than explains it (the start year, for a
+   holder already drawing). Stronger text, still not an error. */
+.system-options-prompt {
+  color: var(--muted-strong);
+}
 .system-notes {
   margin-top: 12px;
 }

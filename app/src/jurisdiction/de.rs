@@ -44,6 +44,18 @@ pub fn settings(slot: SettingsSlot) -> View {
     let year_value =
         move || options.with(|m| m.get(de_opts::BASE_YEAR).cloned().unwrap_or_default());
     let year_placeholder = de_opts::base_year_fallback().to_string();
+    // Someone already drawing is asked when they *started*, not when they will:
+    // the same control, the same option, but a past question — and one worth
+    // pressing, since a blank then quietly uses a later cohort than theirs. Both
+    // wordings are `de-tax`'s; only the choice between them is made here.
+    let already = slot.already_drawing;
+    let year_label = move || {
+        if already.get() {
+            de_opts::BASE_YEAR_LABEL_STARTED
+        } else {
+            de_opts::BASE_YEAR_LABEL
+        }
+    };
 
     view! {
         <div class="system-options">
@@ -65,7 +77,7 @@ pub fn settings(slot: SettingsSlot) -> View {
                 </select>
             </label>
             <label class="fld">
-                <span class="fld-lbl">{de_opts::BASE_YEAR_LABEL}</span>
+                <span class="fld-lbl">{year_label}</span>
                 <input
                     type="number"
                     inputmode="numeric"
@@ -75,6 +87,9 @@ pub fn settings(slot: SettingsSlot) -> View {
                 />
             </label>
             <p class="system-options-note">{de_opts::BASE_YEAR_NOTE}</p>
+            {move || already.get().then(|| view! {
+                <p class="system-options-note system-options-prompt">{de_opts::BASE_YEAR_STARTED_NOTE}</p>
+            })}
             <p class="system-options-note">{de_opts::FILING_NOTE}</p>
         </div>
     }

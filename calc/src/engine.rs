@@ -259,12 +259,25 @@ fn groups_by_return(prepared: &[Prepared]) -> Vec<Vec<usize>> {
 }
 
 /// The accumulation (growth) period in whole months, validated against the
-/// 1-month floor and the 100-year cap. Shared by [`calculate`] and the goal-seek
-/// solvers so they agree on what a horizon is.
+/// 100-year cap and — in deposits mode only — a 1-month floor. Shared by
+/// [`calculate`] and the goal-seek solvers so they agree on what a horizon is.
+///
+/// A drawdown may have **no** growth phase at all: a holder who has already
+/// started drawing is projected from today's values straight into the drawdown,
+/// and the handover is month zero. That is a legal shape for the month loop (the
+/// drawdown's own 1-month floor keeps the series at two points or more), so the
+/// floor applies only where a zero-length projection would be meaningless — a
+/// plain accumulation over no time.
 pub(crate) fn horizon_months_of(input: &CalcInput) -> Result<u32, CalcError> {
+    // A blank is asked for, not read as zero: now that zero is a legal drawdown
+    // horizon, an empty box silently meaning "start drawing today" would flip the
+    // projection while the control sits empty on screen.
+    if input.horizon_value.trim().is_empty() {
+        return Err(CalcError::new("Enter a growth period.", Some(Field::Horizon)));
+    }
     let h = to_months(&input.horizon_value, input.horizon_unit, "The growth period")
         .map_err(|m| CalcError::new(m, Some(Field::Horizon)))?;
-    if h < 1 {
+    if h < 1 && matches!(input.plan, Plan::Deposits) {
         return Err(CalcError::new("Enter a growth period of at least 1 month.", Some(Field::Horizon)));
     }
     if h > MAX_HORIZON_MONTHS {
@@ -997,8 +1010,8 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
     let series: Vec<Decimal> = totals.iter().map(|v| round2(*v)).collect();
     let contributions_series: Vec<Decimal> = contribs.iter().map(|v| round2(*v)).collect();
     let withdrawals_series: Vec<Decimal> = withdraws.iter().map(|v| round2(*v)).collect();
-    let current_total = round2(*totals.first().expect("horizon >= 1 guarantees a point"));
-    let projected_total = round2(*totals.last().expect("horizon >= 1 guarantees a point"));
+    let current_total = round2(*totals.first().expect("the series always holds its month-0 point"));
+    let projected_total = round2(*totals.last().expect("a drawdown or growth period of >= 1 month guarantees a point"));
     let handover_total = if drawing { Some(round2(totals[horizon])) } else { None };
     let contributed_total = round2(contributed_total);
     let withdrawn_total = round2(withdrawn_total);

@@ -176,14 +176,27 @@ pub fn App() -> impl IntoView {
     let horizon_value = create_rw_signal(state.horizon_value);
     let horizon_unit = create_rw_signal(state.horizon_unit);
 
-    // The top-level mode (`"deposits"` / `"drawdown"`) and the drawdown-only
-    // controls it reveals. The growth period above is shared by both modes;
-    // `drawdown_value`/`drawdown_unit`/`withdrawal` only matter while drawing down.
+    // The top-level mode (a `convert::Mode` id) and the drawdown-only controls
+    // it reveals. `drawdown_value`/`drawdown_unit`/`withdrawal` only matter while
+    // drawing down. Two gates, asked of the catalogue rather than of the string:
+    // `is_drawdown` ("show the drawdown controls") is true for *both* drawing
+    // modes, and `has_growth` is false only when already drawing — the mode that
+    // removes the growth period and the per-row deposit box.
     let plan_kind = create_rw_signal(state.plan);
     let drawdown_value = create_rw_signal(state.drawdown_value);
     let drawdown_unit = create_rw_signal(state.drawdown_unit);
     let withdrawal = create_rw_signal(state.withdrawal);
-    let is_drawdown = move || plan_kind.get() == "drawdown";
+    let mode = move || convert::Mode::from_id(&plan_kind.get());
+    // Memos, not derived closures, and this is load-bearing: a `.then(...)` view
+    // closure re-runs whenever anything it read changes, so gated on a closure
+    // over `plan_kind` the growth row would be rebuilt on *every* mode change —
+    // including deposits<->drawdown, where the shared `#horizon-value` node must
+    // survive. A memo notifies only when its value flips, so the growth row is
+    // rebuilt only when the growth phase itself appears or disappears.
+    let is_drawdown_m = create_memo(move |_| mode().draws_down());
+    let has_growth_m = create_memo(move |_| mode().has_growth_phase());
+    let is_drawdown = move || is_drawdown_m.get();
+    let has_growth = move || has_growth_m.get();
 
     // The tax controls. All drawdown-only, and all inert while the withdrawal is
     // split pro-rata -- that strategy ignores tax entirely, so `convert::tax_from`
@@ -333,7 +346,7 @@ pub fn App() -> impl IntoView {
                 })
                 .unwrap_or_default()
         };
-        let amount = if plan == "drawdown" { draw } else { target };
+        let amount = if convert::Mode::from_id(&plan).draws_down() { draw } else { target };
         Some(describe(&result, &amount, &horizon_lbl, &drawdown_lbl))
     });
 
@@ -381,7 +394,6 @@ pub fn App() -> impl IntoView {
         let row = new_row(counter, &RowData::default());
         rows.update(|v| v.push(row));
     };
-    let horizon_ref = bind_value(horizon_value);
 
     // The current goal kind, resolved within the active mode so a kind left over
     // from the other mode falls back to that mode's default (see `GoalKind::parse`).
@@ -472,19 +484,22 @@ pub fn App() -> impl IntoView {
                 // holdings editor is shared between modes and stays put, so there
                 // is no tabpanel to control — a radio group is the honest "setting
                 // that reconfigures the form" and gives arrow-key navigation, one
-                // tab stop and "2 of 2, selected" for free. `prop:checked` (not the
-                // `checked` attribute) so it re-drives after user interaction.
+                // tab stop and "2 of 3, selected" for free. `prop:checked` (not the
+                // `checked` attribute) so it re-drives after user interaction. One
+                // radio per `convert::Mode`, so a mode appears here without
+                // touching the markup and none can be checked by a stale `!`.
                 <fieldset class="mode-switch">
                     <legend>"What are you planning?"</legend>
                     <div class="segmented">
-                        <input type="radio" id="mode-deposits" name="mode" value="deposits"
-                               prop:checked=move || !is_drawdown()
-                               on:change=move |_| plan_kind.set("deposits".to_string()) />
-                        <label for="mode-deposits">"Building it up"</label>
-                        <input type="radio" id="mode-drawdown" name="mode" value="drawdown"
-                               prop:checked=is_drawdown
-                               on:change=move |_| plan_kind.set("drawdown".to_string()) />
-                        <label for="mode-drawdown">"Drawing it down"</label>
+                        {convert::Mode::ALL.into_iter().map(|m| {
+                            let id = format!("mode-{}", m.id());
+                            view! {
+                                <input type="radio" id=id.clone() name="mode" value=m.id()
+                                       prop:checked=move || mode() == m
+                                       on:change=move |_| plan_kind.set(m.id().to_string()) />
+                                <label for=id>{m.label()}</label>
+                            }
+                        }).collect_view()}
                     </div>
                     // The jurisdiction picker: a static option set (the fixed
                     // catalogue), so it never falls foul of the swap-reset trap.
@@ -537,7 +552,6 @@ pub fn App() -> impl IntoView {
                             // the guarded refs as locals before the template.
                             let name_ref = bind_value(r.name);
                             let value_ref = bind_value(r.value);
-                            let contribution_ref = bind_value(r.contribution);
                             let rate_ref = bind_value(r.rate);
                             // `node_ref` takes a plain binding, not a field access.
                             let remove_ref = r.remove_btn;
@@ -577,23 +591,34 @@ pub fn App() -> impl IntoView {
                                             on:input=move |ev| r.value.set(event_target_value(&ev)) />
                                     </span>
                                 </label>
-                                <label class="fld">
-                                    // The label wraps the input, so its visible
-                                    // text *is* the accessible name (WCAG 2.5.3) —
-                                    // no `aria-label` to override the on-screen
-                                    // "Monthly deposit".
-                                    <span class="fld-lbl">"Monthly deposit"</span>
-                                    <span class="adorn adorn-money">
-                                        <input
-                                            type="text" inputmode="decimal"
-                                            placeholder="100"
-                                            node_ref=contribution_ref
-                                            aria-invalid=move || invalid_attrs(contribution_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(contribution_bad.get()).1
-                                            class:field-invalid=move || contribution_bad.get()
-                                            on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
-                                    </span>
-                                </label>
+                                // Only while there is a growth phase for a deposit
+                                // to land in. Already drawing, the projection pays
+                                // nothing in (`build_input` sends "0"), so a box
+                                // here would be a control that changes nothing.
+                                // The ref is created inside the block so a fresh
+                                // binding applies the value when it (re)mounts.
+                                {move || has_growth().then(|| {
+                                    let contribution_ref = bind_value(r.contribution);
+                                    view! {
+                                    <label class="fld">
+                                        // The label wraps the input, so its visible
+                                        // text *is* the accessible name (WCAG 2.5.3) —
+                                        // no `aria-label` to override the on-screen
+                                        // "Monthly deposit".
+                                        <span class="fld-lbl">"Monthly deposit"</span>
+                                        <span class="adorn adorn-money">
+                                            <input
+                                                type="text" inputmode="decimal"
+                                                placeholder="100"
+                                                node_ref=contribution_ref
+                                                aria-invalid=move || invalid_attrs(contribution_bad.get()).0
+                                                aria-describedby=move || invalid_attrs(contribution_bad.get()).1
+                                                class:field-invalid=move || contribution_bad.get()
+                                                on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
+                                        </span>
+                                    </label>
+                                    }
+                                })}
                                 <label class="fld">
                                     <span class="fld-lbl">"Annual return"</span>
                                     <span class="adorn adorn-pct">
@@ -697,30 +722,50 @@ pub fn App() -> impl IntoView {
                         {move || copy_status.get()}
                     </p>
 
-                    // The periods. Row one is shared: the *same* horizon input
-                    // node in both modes (only the surrounding words change), so
-                    // switching mode never rebuilds it and takes focus/caret with
-                    // it. Rows two and three appear only while drawing down.
+                    // The periods. Row one is shared between deposits and
+                    // drawdown: the *same* horizon input node in both (only the
+                    // surrounding words change), so switching between them never
+                    // rebuilds it and takes focus/caret with it. It is therefore
+                    // gated on `has_growth`, **not** on the mode: that closure
+                    // re-runs only when the growth phase appears or disappears,
+                    // and the deposits<->drawdown switch does neither. Already
+                    // drawing has no growth period at all, so the row is removed
+                    // — there is no caret to keep across that transition. Don't
+                    // "restore" the node to an always-present branch, and don't
+                    // widen the gate to `is_drawdown`. Rows two and three appear
+                    // only while drawing down.
                     <div class="periods">
-                        <div class="period-row">
-                            <label for="horizon-value">
-                                {move || if is_drawdown() { "Grow for" } else { "Project" }}
-                            </label>
-                            <input
-                                id="horizon-value" type="number" min="1" step="1" inputmode="numeric"
-                                node_ref=horizon_ref
-                                aria-invalid=move || invalid_attrs(horizon_bad.get()).0
-                                aria-describedby=move || invalid_attrs(horizon_bad.get()).1
-                                class:field-invalid=move || horizon_bad.get()
-                                on:input=move |ev| horizon_value.set(event_target_value(&ev)) />
-                            <select
-                                aria-label="Growth period unit"
-                                on:change=move |ev| horizon_unit.set(event_target_value(&ev))>
-                                <option value="years" selected=move || horizon_unit.get() == "years">"years"</option>
-                                <option value="months" selected=move || horizon_unit.get() == "months">"months"</option>
-                            </select>
-                            <span>{move || if is_drawdown() { "," } else { "into the future" }}</span>
-                        </div>
+                        {move || has_growth().then(|| {
+                            // The ref is created inside the block so a fresh
+                            // binding applies the value when the row (re)mounts.
+                            let horizon_ref = bind_value(horizon_value);
+                            view! {
+                                <div class="period-row">
+                                    <label for="horizon-value">
+                                        {move || if is_drawdown() { "Grow for" } else { "Project" }}
+                                    </label>
+                                    // `min` follows `calc`'s floor: a zero growth
+                                    // period is legal while drawing down (it is the
+                                    // "already drawing" shape, typed by hand), so the
+                                    // spinner and constraint validation must allow it.
+                                    <input
+                                        id="horizon-value" type="number" step="1" inputmode="numeric"
+                                        min=move || if is_drawdown() { "0" } else { "1" }
+                                        node_ref=horizon_ref
+                                        aria-invalid=move || invalid_attrs(horizon_bad.get()).0
+                                        aria-describedby=move || invalid_attrs(horizon_bad.get()).1
+                                        class:field-invalid=move || horizon_bad.get()
+                                        on:input=move |ev| horizon_value.set(event_target_value(&ev)) />
+                                    <select
+                                        aria-label="Growth period unit"
+                                        on:change=move |ev| horizon_unit.set(event_target_value(&ev))>
+                                        <option value="years" selected=move || horizon_unit.get() == "years">"years"</option>
+                                        <option value="months" selected=move || horizon_unit.get() == "months">"months"</option>
+                                    </select>
+                                    <span>{move || if is_drawdown() { "," } else { "into the future" }}</span>
+                                </div>
+                            }
+                        })}
 
                         {move || is_drawdown().then(|| {
                             // Refs created inside the block so a fresh binding
@@ -729,7 +774,9 @@ pub fn App() -> impl IntoView {
                             let withdrawal_ref = bind_value(withdrawal);
                             view! {
                                 <div class="period-row">
-                                    <label for="drawdown-value">"then draw down for"</label>
+                                    <label for="drawdown-value">
+                                        {move || if has_growth() { "then draw down for" } else { "Draw down for" }}
+                                    </label>
                                     <input
                                         id="drawdown-value" type="number" min="1" step="1" inputmode="numeric"
                                         node_ref=drawdown_ref
@@ -815,7 +862,11 @@ pub fn App() -> impl IntoView {
                                 {adorned_field("other-income", "Other taxable income", "money", "0",
                                     "a year", income_ref, other_income, income_bad)}
                                 <div class="period-row">
-                                    <label for="age">"Age when it starts"</label>
+                                    // A fixed access-age gate, so for someone already
+                                    // drawing the age that matters is simply today's.
+                                    <label for="age">
+                                        {move || if has_growth() { "Age when it starts" } else { "Age now" }}
+                                    </label>
                                     {aria_text_input("age", "numeric", "60", age_ref, age, age_bad)}
                                     // A single-region tax system needs no control
                                     // at all, so it gets none rather than a
@@ -846,6 +897,7 @@ pub fn App() -> impl IntoView {
                                     .settings_panel
                                     .map(|panel| panel(crate::jurisdiction::SettingsSlot {
                                         options,
+                                        already_drawing: Signal::derive(move || !has_growth()),
                                     }))}
                             })}
                         </fieldset>

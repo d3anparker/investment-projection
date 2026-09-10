@@ -658,6 +658,74 @@ use crate::types::NEUTRAL_CURRENCY;
         assert_eq!(dd.depletion_month, None);
     }
 
+    // --- drawdown with no growth phase ("already drawing") ------------------
+
+    #[test]
+    fn a_zero_growth_period_is_legal_only_while_drawing_down() {
+        // The 1-month floor is a deposits-mode rule: an accumulation over no time
+        // is meaningless, but a drawdown that starts today is exactly how someone
+        // already drawing is projected. Both spellings of zero are accepted.
+        let holdings = vec![holding("X", "10000", "5", "0")];
+        assert!(calculate(&drawdown(holdings.clone(), "0", Unit::Years, "10", Unit::Years, "100")).is_ok());
+        assert!(calculate(&drawdown(holdings.clone(), "0", Unit::Months, "10", Unit::Years, "100")).is_ok());
+        let err = calculate(&deposits(holdings, "0", Unit::Years)).unwrap_err();
+        assert!(err.message.contains("at least 1 month"));
+        assert_eq!(err.field, Some(Field::Horizon));
+    }
+
+    #[test]
+    fn a_zero_growth_drawdown_hands_over_todays_value_and_reconciles() {
+        // With no growth phase the handover *is* today: the pot drawn down is the
+        // value-today total, deposits are never paid (they stop at the handover,
+        // which is month zero), and the first withdrawal lands in month one. The
+        // reconciliation identity holds as in any other drawdown.
+        let dd = calculate(&drawdown(
+            vec![holding("Eq", "10000", "7", "200"), holding("Bond", "5000", "3", "0")],
+            "0",
+            Unit::Years,
+            "20",
+            Unit::Years,
+            "500",
+        ))
+        .unwrap();
+        assert_eq!(dd.horizon_months, 0);
+        assert_eq!(dd.drawdown_months, 240);
+        assert_eq!(dd.series.len(), 241);
+        assert_eq!(dd.handover_total, Some(dd.current_total));
+        assert_eq!(dd.series[0], dd.current_total);
+        for r in &dd.investments {
+            assert_eq!(r.handover_value, Some(r.current_value));
+            assert_eq!(r.contributed, d("0.00"), "a deposit was paid with no growth phase");
+        }
+        assert_eq!(dd.contributed_total, d("0.00"));
+        assert!(dd.contributions_series.iter().all(|c| c.is_zero()));
+        assert_eq!(dd.withdrawals_series[0], d("0.00"));
+        assert_eq!(dd.withdrawals_series[1], d("500.00"));
+        assert_eq!(
+            dd.projected_total,
+            dd.current_total + dd.contributed_total - dd.withdrawn_total - dd.charged_total + dd.growth
+        );
+    }
+
+    #[test]
+    fn time_to_deplete_at_zero_growth_is_the_absolute_month() {
+        // `Solution::Depletes(m)` is drawdown months and `depletion_month` is
+        // absolute; with no growth phase the two coincide.
+        let input = drawdown(vec![holding("X", "1200", "0", "0")], "0", Unit::Months, "24", Unit::Months, "100");
+        let out = calculate(&input).unwrap();
+        assert_eq!(out.depletion_month, Some(12));
+        assert_eq!(solve(&input, &Goal::TimeToDeplete).unwrap(), Solution::Depletes(12));
+    }
+
+    #[test]
+    fn max_withdrawal_at_zero_growth_names_the_start_of_drawdown() {
+        // An empty pot has nothing to draw down; the message must read sensibly
+        // when there is no growth period for it to be "at the end of".
+        let input = drawdown(vec![holding("X", "0", "5", "0")], "0", Unit::Months, "24", Unit::Months, "100");
+        let err = solve(&input, &Goal::MaxWithdrawal).unwrap_err();
+        assert!(!err.message.contains("growth period"), "{}", err.message);
+    }
+
     #[test]
     fn two_phase_overflow_errors_instead_of_panicking() {
         // 100% annualised over 50y grow + 50y draw. The pro-rata loop now has a
@@ -1831,5 +1899,50 @@ mod levy {
         ))
         .unwrap();
         assert_eq!(out.unused_allowance_total, d("0.00"));
+    }
+
+    #[test]
+    fn a_zero_growth_drawdown_levies_its_first_charge_at_month_twelve() {
+        // With no growth phase the anchor and the handover coincide at month
+        // zero, so the first period boundary falls a full period later. This is
+        // also why a true zero beats the one-month workaround: a one-month growth
+        // period closes a period at month 1 and charges a whole year's levy on
+        // the whole pot at once.
+        let run = |grow: &str| {
+            calculate(&strategy_run(
+                vec![account("Fund", FUND, "300000", "0", "0")],
+                grow,
+                "36",
+                "1000",
+                Strategy::cheapest_first(),
+                Some(levy_ctx(vec![])),
+            ))
+            .unwrap()
+        };
+        let zero = run("0");
+        // `charged_series[i]` is the state before month `i`'s boundary is worked,
+        // so a charge at month 12 first shows in the reading at 13.
+        assert!(zero.charged_series[..=12].iter().all(|c| c.is_zero()), "nothing is charged before month 12");
+        assert!(zero.charged_series[13] > d("0.00"), "the first period closes at month 12");
+        let one = run("1");
+        assert!(one.charged_series[2] > d("0.00"), "the workaround is charged at month 1");
+    }
+
+    #[test]
+    fn a_zero_growth_drawdown_counts_every_period_as_drawdown() {
+        // The baseline is read at the handover boundary; with no growth phase
+        // there is no such boundary and nothing is banked before drawing starts,
+        // so every period's allowance is drawdown headroom. Same answer as the
+        // ten-year growth run above: the figure measures the drawdown alone.
+        let out = calculate(&strategy_run(
+            vec![account("Cash", PLAIN, "600000", "0", "0")],
+            "0",
+            "120",
+            "1000",
+            Strategy::cheapest_first(),
+            Some(levy_ctx(vec![])),
+        ))
+        .unwrap();
+        assert_eq!(out.unused_allowance_total, d("10000.00"), "ten drawdown years at 1,000 apiece");
     }
 }

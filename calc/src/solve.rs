@@ -148,7 +148,7 @@ fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> 
         // no session here and the run is untaxed exactly as before.
         let mut plan = open_if_ordered(&input.tax, &Strategy::pro_rata(), false)?;
         let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::pro_rata(), &[], None, &mut plan)?;
-        Ok(round2(*run.totals.last().expect("horizon >= 1 guarantees a point")))
+        Ok(round2(*run.totals.last().expect("the deposits probe runs over the 100-year cap, so the series has an end")))
     };
 
     if projected_with(Decimal::ZERO)? >= target {
@@ -243,7 +243,7 @@ fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
     // there is nothing to spend down.
     if round2(run_with(Decimal::ZERO)?.totals[horizon_months as usize]) <= Decimal::ZERO {
         return Err(CalcError::new(
-            "The portfolio has nothing left to draw down at the end of the growth period.",
+            "The portfolio has nothing to draw down when the drawdown begins.",
             None,
         ));
     }

@@ -53,6 +53,12 @@ pub struct Jurisdiction {
 #[derive(Clone, Copy)]
 pub struct SettingsSlot {
     pub options: RwSignal<BTreeMap<String, String>>,
+    /// Whether the holder is *already* drawing — a drawdown with no growth
+    /// phase. A control that asks about the start of drawing is then asking a
+    /// past question, and the panel may word it (and prompt for it) as one. Never
+    /// a default: the year drawing began is a fact about the holder, and the app
+    /// has nothing to derive it from.
+    pub already_drawing: Signal<bool>,
 }
 
 /// What a notes panel is handed. Currently nothing — the German notes are

@@ -339,6 +339,20 @@ mod tests {
     }
 
     #[test]
+    fn the_already_drawing_mode_round_trips_without_a_version_bump() {
+        // The mode is a free string in the envelope, so a third mode needs no new
+        // field and no `VERSION` bump — and a past start year typed under it
+        // rides along in the options map.
+        let mut s = sample();
+        s.plan = crate::convert::Mode::AlreadyDrawing.id().into();
+        s.options.insert("base_year".into(), "2024".into());
+        let back = decode(&encode(&s)).expect("a valid link");
+        assert_eq!(back.plan, "already-drawing");
+        assert_eq!(back.options.get("base_year").map(String::as_str), Some("2024"));
+        assert_eq!(back, s);
+    }
+
+    #[test]
     fn an_empty_row_list_decodes_to_none() {
         let payload = URL_SAFE_NO_PAD.encode(r#"{"v":2,"rows":[]}"#);
         assert_eq!(decode(&format!("v={payload}")), None);
