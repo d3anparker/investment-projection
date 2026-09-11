@@ -478,6 +478,80 @@ async fn a_transient_error_does_not_reset_the_scrubber() {
     assert_eq!(scrub_after.get_attribute("aria-valuenow").as_deref(), Some("0"));
 }
 
+/// The client x of the plot's horizontal midpoint on `scrub`: past the y-axis
+/// gutter, which `chart::Layout` sizes for the element's measured width.
+fn plot_midpoint_x(scrub: &web_sys::Element) -> f64 {
+    let rect = scrub.get_bounding_client_rect();
+    let l = app::chart::Layout::for_width(rect.width());
+    rect.left() + (l.left_frac() + l.width_frac() / 2.0) * rect.width()
+}
+
+#[wasm_bindgen_test]
+async fn a_touch_drag_scrubs_and_the_reading_survives_the_lift() {
+    let root = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    harness::settle().await;
+    let scrub = harness::q(&root, ".chart-scrub");
+    let marker = harness::q(&root, ".chart-marker");
+    assert_eq!(scrub.get_attribute("aria-valuenow").as_deref(), Some("120"));
+    assert!(!marker.class_list().contains("on"));
+
+    // A finger lands on the plot's midpoint and drags: the slider reads the
+    // month under it rather than the page scrolling out from underneath.
+    let x = plot_midpoint_x(&scrub);
+    harness::pointer(&scrub, "pointerdown", "touch", x).await;
+    harness::pointer(&scrub, "pointermove", "touch", x).await;
+    let now: i64 = scrub.get_attribute("aria-valuenow").unwrap().parse().unwrap();
+    assert!((now - 60).abs() <= 2, "midpoint should read ~month 60, got {now}");
+    assert!(marker.class_list().contains("on"));
+
+    // Lifting the finger fires pointerleave; the reading it just uncovered
+    // must stay on screen…
+    harness::pointer(&scrub, "pointerleave", "touch", x).await;
+    assert!(marker.class_list().contains("on"), "the reading vanished on lift");
+    assert!(harness::text(&root, ".chart-readout").contains("Year 5"));
+
+    // …until the slider loses focus (a tap somewhere else).
+    harness::fire(&scrub, "blur").await;
+    assert!(!marker.class_list().contains("on"));
+}
+
+#[wasm_bindgen_test]
+async fn a_mouse_leaving_the_chart_hides_the_reading() {
+    let root = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    harness::settle().await;
+    let scrub = harness::q(&root, ".chart-scrub");
+    let marker = harness::q(&root, ".chart-marker");
+
+    let x = plot_midpoint_x(&scrub);
+    harness::pointer(&scrub, "pointermove", "mouse", x).await;
+    assert!(marker.class_list().contains("on"));
+    // Nothing covers a mouse reading, so leaving clears it as it always did.
+    harness::pointer(&scrub, "pointerleave", "mouse", x).await;
+    assert!(!marker.class_list().contains("on"));
+}
+
+#[wasm_bindgen_test]
+async fn the_chart_is_drawn_at_its_measured_width_and_never_overflows() {
+    let root = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    // A phone-sized column: narrower than the old 380px floor that used to
+    // push the chart into a sideways scroll.
+    root.set_attribute("style", "width: 300px").unwrap();
+    harness::sleep(50).await; // the ResizeObserver delivers after layout
+    harness::settle().await;
+
+    let stage = harness::q(&root, ".chart-stage");
+    let svg = harness::q(&root, ".chart svg");
+    let view_box = svg.get_attribute("viewBox").unwrap_or_default();
+    assert!(view_box.starts_with("0 0 300 "), "viewBox was {view_box:?}");
+    assert!(
+        stage.scroll_width() <= 300,
+        "chart overflows its 300px column: scroll width {}",
+        stage.scroll_width()
+    );
+    // The type is a fixed pixel size, not a share of the width.
+    assert!(harness::text_of(&svg).is_empty() || svg.inner_html().contains("font-size:13px"));
+}
+
 // =====================================================================
 // Fixtures
 // =====================================================================
@@ -1271,7 +1345,7 @@ mod harness {
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
         Element, Event, EventInit, HtmlButtonElement, HtmlElement, HtmlInputElement,
-        HtmlSelectElement, KeyboardEvent, KeyboardEventInit,
+        HtmlSelectElement, KeyboardEvent, KeyboardEventInit, PointerEvent, PointerEventInit,
     };
 
     fn document() -> web_sys::Document {
@@ -1409,6 +1483,12 @@ mod harness {
         settle().await;
     }
 
+    /// Fire an arbitrary bubbling event (`blur`, say) and settle.
+    pub async fn fire(el: &Element, kind: &str) {
+        el.dispatch_event(&bubbling(kind)).unwrap();
+        settle().await;
+    }
+
     /// Fire a bubbling `input` without changing the value (caret test).
     pub async fn dispatch_input(el: &HtmlInputElement) {
         el.dispatch_event(&bubbling("input")).unwrap();
@@ -1428,6 +1508,22 @@ mod harness {
         init.set_cancelable(true);
         init.set_key(key);
         let ev = KeyboardEvent::new_with_keyboard_event_init_dict("keydown", &init).unwrap();
+        el.dispatch_event(&ev).unwrap();
+        settle().await;
+    }
+
+    /// Dispatch a pointer event of `kind` from a `pointer_type` ("touch",
+    /// "mouse", "pen") at viewport x `client_x`. Firefox derives `offsetX`
+    /// from `clientX` and the target's box, which is what the scrubber reads.
+    pub async fn pointer(el: &Element, kind: &str, pointer_type: &str, client_x: f64) {
+        let init = PointerEventInit::new();
+        init.set_bubbles(true);
+        init.set_cancelable(true);
+        init.set_pointer_type(pointer_type);
+        init.set_client_x(client_x as i32);
+        let rect = el.get_bounding_client_rect();
+        init.set_client_y((rect.top() + rect.height() / 2.0) as i32);
+        let ev = PointerEvent::new_with_event_init_dict(kind, &init).unwrap();
         el.dispatch_event(&ev).unwrap();
         settle().await;
     }

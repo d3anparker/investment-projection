@@ -791,28 +791,21 @@ input[type="number"]::-webkit-inner-spin-button {
   margin: 0 0 18px;
 }
 
-/* The chart's labels are sized in SVG viewBox units, so their on-screen size is
-   purely a function of how wide the chart renders: font-size * width / 640.
-   Left to fill the container it hit ~8px on a 375px phone and ~11px in the
-   desktop results column. Pin the width into a band instead — scroll sideways
-   below the floor rather than shrink the type, and centre below the ceiling so
-   the single-column layout doesn't blow the labels up. Paired with
-   `AXIS_FONT` in chart.rs; change the two together. */
-.chart-scroll {
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-}
-
 /* The sized, positioned box: the SVG, the scrub marker and the slider overlay
-   all share these bounds, which is what keeps the marker on the data. */
+   all share these bounds, which is what keeps the marker on the data.
+
+   No `min-width`, on purpose. The chart is drawn at this box's *measured*
+   width (results.rs watches it with a ResizeObserver and chart.rs sizes the
+   viewBox to match), so one SVG unit is one pixel and the axis type is the
+   same 13px whether the box is 280px on a phone or 640px on a desktop. The
+   old design fixed the viewBox at 640 units, which made the type scale with
+   the box and forced a 380px floor here; every phone overflowed it into a
+   sideways scroll, and the browser then took horizontal touch drags as
+   scrolling before the slider overlay ever saw them. The ceiling is taste,
+   not legibility, and matches `DEFAULT_WIDTH` in chart.rs. */
 .chart-stage {
   position: relative;
-  /* 380, not 400: just under the breakdown column's width at the narrowest
-     two-column window (~960px), so the chart stops scrolling sideways there.
-     Labels render at 22 * 380 / 640 = 13px, still well clear of the ~8px floor
-     that set this band in the first place. */
-  min-width: 380px;
-  max-width: 520px;
+  max-width: 640px;
   margin: 0 auto;
 }
 
@@ -839,6 +832,11 @@ input[type="number"]::-webkit-inner-spin-button {
   position: absolute;
   inset: 0;
   cursor: crosshair;
+  /* Horizontal finger drags scrub; vertical ones still scroll the page. With
+     the default `auto` the browser claims a sideways drag as a pan — even
+     when there is nothing to pan — and cancels the pointer stream, so the
+     slider never receives a `pointermove` from a touch. */
+  touch-action: pan-y;
 }
 
 .chart-scrub:focus-visible {

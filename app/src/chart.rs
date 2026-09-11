@@ -7,29 +7,81 @@ use crate::format::{currency, group_thousands};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
-/// Axis and legend type size, in SVG viewBox units. What the reader actually
-/// sees is `AXIS_FONT * rendered_width / 640`, so this is only half the story —
-/// `.chart`'s `min-width`/`max-width` in `styles.css` pins the rendered width
-/// into the band where 22 units lands between ~13.7px and ~17.9px. The two have
-/// to be changed together. The gutters in `chart_svg` are sized against it too.
-const AXIS_FONT: f64 = 22.0;
+/// Axis and legend type size. The viewBox is sized to the chart's *measured*
+/// rendered width ([`Layout::for_width`]), so one viewBox unit is one CSS pixel
+/// and this is literally the on-screen size at every width — a phone and a
+/// desktop column get the same 13px type. (It used to be 22 units on a fixed
+/// 640-unit viewBox, which made the type a function of the rendered width and
+/// forced a `min-width` on the chart that overflowed every phone; sideways
+/// scrolling then swallowed touch drags before the scrubber saw them.) The
+/// gutters in [`Layout`] are sized against it.
+const AXIS_FONT: f64 = 13.0;
 
-// viewBox geometry. Shared as fractions below so the interactive overlay can
-// line up with the plotted line instead of re-deriving these numbers.
-const W: f64 = 640.0;
-const H: f64 = 300.0;
-const PL: f64 = 112.0;
-const PR: f64 = 24.0;
-const PT: f64 = 16.0;
-const PB: f64 = 34.0;
+/// The viewBox width used before the stage has been measured (first paint,
+/// and the native tests, which have no layout). Also the widest the chart is
+/// allowed to render, via `.chart-stage { max-width }` in `styles.css`.
+pub const DEFAULT_WIDTH: f64 = 640.0;
 
-/// The plot area as fractions of the rendered chart box: where the line starts,
-/// how wide it runs, and its vertical extent. `main.rs` positions the scrub
-/// marker with these, so the marker and the data cannot drift apart.
-pub const PLOT_LEFT_FRAC: f64 = PL / W;
-pub const PLOT_WIDTH_FRAC: f64 = (W - PL - PR) / W;
-pub const PLOT_TOP_FRAC: f64 = PT / H;
-pub const PLOT_BOTTOM_FRAC: f64 = PB / H;
+/// Narrower than this and the gutters would eat the plot; the stage is never
+/// this narrow in practice (a 320px phone still leaves ~230px inside the panel).
+const MIN_WIDTH: f64 = 240.0;
+
+/// viewBox geometry for one rendered width. Shared with the interactive overlay
+/// (as fractions, below) so the scrub marker lines up with the plotted line
+/// instead of re-deriving these numbers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// viewBox width — equal to the rendered width, so units are pixels.
+    pub w: f64,
+    pub h: f64,
+    /// Left gutter: holds the widest right-anchored y-label plus an 8-unit gap.
+    pub pl: f64,
+    /// Right gutter: the right half of the final x-label ("120m").
+    pub pr: f64,
+    pub pt: f64,
+    pub pb: f64,
+}
+
+impl Layout {
+    /// The layout for a chart rendered `width_px` wide. A non-positive width
+    /// (unmeasured) falls back to [`DEFAULT_WIDTH`]; the height follows the
+    /// width so a phone chart is shorter, capped at the desktop proportion.
+    pub fn for_width(width_px: f64) -> Layout {
+        let w = if width_px > 0.0 && width_px.is_finite() {
+            width_px.max(MIN_WIDTH)
+        } else {
+            DEFAULT_WIDTH
+        };
+        // Gutters in units of `AXIS_FONT`: `£999,999` is ~4.4em wide, plus the
+        // 8-unit gap before the axis; the right gutter holds half of "120m".
+        let pl = (AXIS_FONT * 4.5 + 8.0).round();
+        let pr = (AXIS_FONT * 1.2).round();
+        let pt = (AXIS_FONT * 0.8).round();
+        let pb = (AXIS_FONT * 1.7).round();
+        let h = (w * 300.0 / 640.0).clamp(180.0, 300.0).round();
+        Layout { w, h, pl, pr, pt, pb }
+    }
+
+    /// Where the plot starts, as a fraction of the chart box's width.
+    pub fn left_frac(&self) -> f64 {
+        self.pl / self.w
+    }
+
+    /// How wide the plot runs, as a fraction of the chart box's width.
+    pub fn width_frac(&self) -> f64 {
+        (self.w - self.pl - self.pr) / self.w
+    }
+
+    /// The top gutter as a fraction of the chart box's height.
+    pub fn top_frac(&self) -> f64 {
+        self.pt / self.h
+    }
+
+    /// The bottom gutter as a fraction of the chart box's height.
+    pub fn bottom_frac(&self) -> f64 {
+        self.pb / self.h
+    }
+}
 
 /// Compact currency label for the y-axis (no decimals): `£12,000`, abbreviated
 /// past a million to `£1.5M`. The abbreviation is what bounds the label's
@@ -104,8 +156,15 @@ fn polyline_points(vals: &[f64], x: impl Fn(f64) -> f64, y: impl Fn(f64) -> f64)
 /// those months (parallel to `series`). The contributions line is drawn only when
 /// there are actual top-ups. `handover`, when set, is the month the drawdown phase
 /// begins (an index into `series`); a dashed divider marks it and its month joins
-/// the axis ticks. Returns an empty string for an empty series.
-pub fn chart_svg(series: &[Decimal], contributions: &[Decimal], handover: Option<u32>) -> String {
+/// the axis ticks. `layout` is the viewBox geometry for the width the chart is
+/// rendered at (see [`Layout::for_width`]). Returns an empty string for an
+/// empty series.
+pub fn chart_svg(
+    series: &[Decimal],
+    contributions: &[Decimal],
+    handover: Option<u32>,
+    layout: &Layout,
+) -> String {
     let vals: Vec<f64> = series.iter().map(|d| d.to_f64().unwrap_or(0.0)).collect();
     if vals.is_empty() {
         return String::new();
@@ -115,12 +174,7 @@ pub fn chart_svg(series: &[Decimal], contributions: &[Decimal], handover: Option
     // them are non-zero.
     let show_contrib = contrib.len() == vals.len() && contrib.iter().any(|&c| c > 0.0);
 
-    // Gutters are sized against `AXIS_FONT` in viewBox units: `PL` has to hold
-    // the widest y-label (`£999,999`, ~97 units at font 22) plus the 8-unit gap,
-    // and `PR` has to hold the right half of the final x-label ("120m", ~22
-    // units) without clipping the viewBox edge.
-    let (w, h) = (W, H);
-    let (pl, pr, pt, pb) = (PL, PR, PT, PB);
+    let Layout { w, h, pl, pr, pt, pb } = *layout;
     let plot_w = w - pl - pr;
     let plot_h = h - pt - pb;
 
@@ -256,18 +310,18 @@ pub fn chart_svg(series: &[Decimal], contributions: &[Decimal], handover: Option
     // Legend, top-left of the plot, only when both lines are present.
     if show_contrib {
         let lx = pl + 6.0;
-        let ly = pt + 6.0;
+        let ly = pt + AXIS_FONT / 2.0;
         svg.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" class=\"line\"/>\
              <text x=\"{:.1}\" y=\"{:.1}\" class=\"lgnd\" dominant-baseline=\"middle\">Projected value</text>",
-            lx, ly, lx + 20.0, ly, lx + 26.0, ly
+            lx, ly, lx + 16.0, ly, lx + 20.0, ly
         ));
-        // Clear the 22-unit type; at the old 18 the two rows nearly touched.
-        let ly2 = ly + 26.0;
+        // Clear the type with a little air; rows one em apart nearly touched.
+        let ly2 = ly + (AXIS_FONT * 1.2).round();
         svg.push_str(&format!(
             "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" class=\"cline\"/>\
              <text x=\"{:.1}\" y=\"{:.1}\" class=\"lgnd\" dominant-baseline=\"middle\">Contributions</text>",
-            lx, ly2, lx + 20.0, ly2, lx + 26.0, ly2
+            lx, ly2, lx + 16.0, ly2, lx + 20.0, ly2
         ));
     }
     svg.push_str("</svg>");
@@ -283,14 +337,55 @@ mod tests {
         values.iter().map(|s| Decimal::from_str(s).unwrap()).collect()
     }
 
+    /// The unmeasured (desktop-default) layout most tests draw with.
+    fn l() -> Layout {
+        Layout::for_width(DEFAULT_WIDTH)
+    }
+
+    #[test]
+    fn the_viewbox_is_the_rendered_width_so_units_are_pixels() {
+        let s = series(&["100", "150", "225"]);
+        let z = series(&["0", "0", "0"]);
+        let phone = chart_svg(&s, &z, None, &Layout::for_width(300.0));
+        assert!(phone.contains("viewBox=\"0 0 300 "), "{phone}");
+        let desk = chart_svg(&s, &z, None, &Layout::for_width(640.0));
+        assert!(desk.contains("viewBox=\"0 0 640 300\""), "{desk}");
+        // The type is the same size at both — it no longer scales with width.
+        let font = format!("font-size:{AXIS_FONT}px");
+        assert!(phone.contains(&font) && desk.contains(&font));
+        // A phone chart is shorter, but never squashed below the floor.
+        assert!(Layout::for_width(300.0).h < 300.0);
+        assert!(Layout::for_width(240.0).h >= 180.0);
+    }
+
+    #[test]
+    fn an_unmeasured_width_falls_back_to_the_default() {
+        for w in [0.0, -5.0, f64::NAN] {
+            assert_eq!(Layout::for_width(w), Layout::for_width(DEFAULT_WIDTH), "width {w}");
+        }
+        // Below the floor the layout stops shrinking rather than losing the plot.
+        assert_eq!(Layout::for_width(10.0).w, 240.0);
+        let l = Layout::for_width(240.0);
+        assert!(l.w - l.pl - l.pr > 100.0, "plot too narrow at the floor: {l:?}");
+    }
+
+    #[test]
+    fn the_plot_fractions_describe_the_gutters() {
+        let l = Layout::for_width(500.0);
+        assert!((l.left_frac() * 500.0 - l.pl).abs() < 1e-9);
+        assert!((l.width_frac() * 500.0 - (500.0 - l.pl - l.pr)).abs() < 1e-9);
+        assert!((l.top_frac() * l.h - l.pt).abs() < 1e-9);
+        assert!((l.bottom_frac() * l.h - l.pb).abs() < 1e-9);
+    }
+
     #[test]
     fn empty_series_yields_empty_string() {
-        assert_eq!(chart_svg(&[], &[], None), "");
+        assert_eq!(chart_svg(&[], &[], None, &l()), "");
     }
 
     #[test]
     fn renders_well_formed_svg() {
-        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]), None);
+        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]), None, &l());
         assert!(svg.starts_with("<svg"));
         assert!(svg.ends_with("</svg>"));
         assert!(svg.contains("class=\"line\""));
@@ -303,19 +398,19 @@ mod tests {
     #[test]
     fn flat_series_does_not_divide_by_zero() {
         // Equal values give a zero span; must not produce NaN coordinates.
-        let svg = chart_svg(&series(&["500", "500", "500"]), &series(&["0", "0", "0"]), None);
+        let svg = chart_svg(&series(&["500", "500", "500"]), &series(&["0", "0", "0"]), None, &l());
         assert!(!svg.contains("NaN"));
     }
 
     #[test]
     fn contributions_line_drawn_only_when_non_zero() {
         // No top-ups: single value line, no contributions line or legend.
-        let none = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]), None);
+        let none = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "0", "0"]), None, &l());
         assert!(!none.contains("class=\"cline\""));
         assert!(!none.contains("Contributions"));
 
         // With top-ups: the dashed contributions line and legend appear.
-        let with = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50", "100"]), None);
+        let with = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50", "100"]), None, &l());
         assert!(with.contains("class=\"cline\""));
         assert!(with.contains("var(--good)"));
         assert!(with.contains("Contributions"));
@@ -326,7 +421,7 @@ mod tests {
     fn mismatched_contributions_length_is_ignored() {
         // A contributions slice that doesn't parallel the value series is skipped
         // rather than mis-plotted.
-        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50"]), None);
+        let svg = chart_svg(&series(&["100", "150", "225"]), &series(&["0", "50"]), None, &l());
         assert!(!svg.contains("class=\"cline\""));
     }
 
@@ -335,9 +430,9 @@ mod tests {
         let flat = series(&["100", "110", "120", "115", "108"]);
         let zeros = series(&["0", "0", "0", "0", "0"]);
         // No handover: no phase divider.
-        assert!(!chart_svg(&flat, &zeros, None).contains("class=\"phase\""));
+        assert!(!chart_svg(&flat, &zeros, None, &l()).contains("class=\"phase\""));
         // A handover mid-series draws the dashed divider and its label.
-        let dd = chart_svg(&flat, &zeros, Some(2));
+        let dd = chart_svg(&flat, &zeros, Some(2), &l());
         assert!(dd.contains("class=\"phase\""));
         assert!(dd.contains("drawdown"));
         assert!(dd.contains("var(--muted-strong)"));
@@ -349,7 +444,7 @@ mod tests {
         let zeros = series(&["0", "0", "0"]);
         // 0 and the final index are degenerate: no divider, no NaN, still valid.
         for h in [0u32, 2] {
-            let svg = chart_svg(&flat, &zeros, Some(h));
+            let svg = chart_svg(&flat, &zeros, Some(h), &l());
             assert!(!svg.contains("class=\"phase\""), "handover {h} should not draw a divider");
             assert!(!svg.contains("NaN"));
             assert!(svg.starts_with("<svg"));
@@ -359,7 +454,7 @@ mod tests {
     #[test]
     fn a_drawdown_to_zero_renders_without_nan() {
         // A pot drawn all the way to £0 must still plot (baseline is £0).
-        let svg = chart_svg(&series(&["1000", "1200", "600", "0"]), &series(&["0", "0", "0", "0"]), Some(1));
+        let svg = chart_svg(&series(&["1000", "1200", "600", "0"]), &series(&["0", "0", "0", "0"]), Some(1), &l());
         assert!(!svg.contains("NaN"));
         assert!(svg.contains("class=\"phase\""));
     }
@@ -400,14 +495,18 @@ mod tests {
                 .sum::<f64>()
                 * AXIS_FONT
         };
-        let gutter = 112.0 - 8.0;
-        for v in [0.0, 999_999.0, 62_882.0, 12_345_678.0, 4.2e9, 3.0e12] {
-            let label = fmt_axis(v);
-            assert!(
-                width(&label) <= gutter,
-                "{label} is ~{:.0} units wide, gutter is {gutter}",
-                width(&label)
-            );
+        // The gutter is the same at every width — it is sized to the type, not
+        // the chart — so the narrowest layout is as good a check as the default.
+        for w in [240.0, DEFAULT_WIDTH] {
+            let gutter = Layout::for_width(w).pl - 8.0;
+            for v in [0.0, 999_999.0, 62_882.0, 12_345_678.0, 4.2e9, 3.0e12] {
+                let label = fmt_axis(v);
+                assert!(
+                    width(&label) <= gutter,
+                    "{label} is ~{:.0} units wide, gutter is {gutter}",
+                    width(&label)
+                );
+            }
         }
     }
 

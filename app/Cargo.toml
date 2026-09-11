@@ -22,7 +22,11 @@ base64 = "0.22"
 # Explicit web-sys features for the shareable-link plumbing (reading/writing the
 # location hash and copying to the clipboard), rather than relying on whichever
 # features Leptos's `csr` happens to pull in.
-web-sys = { version = "0.3", features = ["History", "Location", "Navigator", "Clipboard", "HtmlDialogElement"] }
+web-sys = { version = "0.3", features = [
+  "History", "Location", "Navigator", "Clipboard", "HtmlDialogElement",
+  # The chart is drawn at its measured width (results.rs `observe_width`).
+  "ResizeObserver", "ResizeObserverEntry", "DomRectReadOnly",
+] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -36,5 +40,5 @@ web-sys = { version = "0.3", features = [
   "Document", "Element", "HtmlElement", "HtmlInputElement", "HtmlSelectElement",
   "HtmlButtonElement", "Node", "NodeList", "DomTokenList", "Event", "EventInit",
   "KeyboardEvent", "KeyboardEventInit", "PointerEvent", "PointerEventInit",
-  "CssStyleDeclaration", "HtmlStyleElement", "Window", "Location",
+  "CssStyleDeclaration", "HtmlStyleElement", "Window", "Location", "DomRect",
 ] }
