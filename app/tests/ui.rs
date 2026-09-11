@@ -534,22 +534,34 @@ async fn a_mouse_leaving_the_chart_hides_the_reading() {
 async fn the_chart_is_drawn_at_its_measured_width_and_never_overflows() {
     let root = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
     // A phone-sized column: narrower than the old 380px floor that used to
-    // push the chart into a sideways scroll.
-    root.set_attribute("style", "width: 300px").unwrap();
+    // push the chart into a sideways scroll. The stage sits inside the wrap's
+    // and panel's padding, so its measured width is a good bit under 320.
+    root.set_attribute("style", "width: 320px").unwrap();
     harness::sleep(50).await; // the ResizeObserver delivers after layout
     harness::settle().await;
 
     let stage = harness::q(&root, ".chart-stage");
     let svg = harness::q(&root, ".chart svg");
+    // The viewBox is the layout for the stage's *measured* width, whatever the
+    // padding leaves it — not the unmeasured 640 default.
+    let measured = stage.client_width() as f64;
+    assert!(measured > 0.0 && measured < 320.0, "stage measured {measured}");
+    let expect_w = app::chart::Layout::for_width(measured).w;
     let view_box = svg.get_attribute("viewBox").unwrap_or_default();
-    assert!(view_box.starts_with("0 0 300 "), "viewBox was {view_box:?}");
+    assert_eq!(
+        view_box,
+        format!("0 0 {} {}", expect_w, app::chart::Layout::for_width(measured).h),
+        "chart not drawn at its measured width (stage {measured}px)"
+    );
+    // And it fits: no sideways scroll to swallow a touch drag.
     assert!(
-        stage.scroll_width() <= 300,
-        "chart overflows its 300px column: scroll width {}",
-        stage.scroll_width()
+        stage.scroll_width() <= stage.client_width() + 1,
+        "chart overflows its column: scroll {} vs client {}",
+        stage.scroll_width(),
+        stage.client_width()
     );
     // The type is a fixed pixel size, not a share of the width.
-    assert!(harness::text_of(&svg).is_empty() || svg.inner_html().contains("font-size:13px"));
+    assert!(svg.inner_html().contains("font-size:13px"));
 }
 
 // =====================================================================
