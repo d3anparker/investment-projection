@@ -18,12 +18,18 @@ concurrency:
 env:
   TRUNK_VERSION: v0.21.14   # keep in step with Dockerfile / devcontainer.json
 
+# Every actions/* below is pinned to the first major that declares
+# `using: node24` - node20 is deprecated and the runner warns on every job.
+# checkout and cache have newer majors still (v7, v6), deliberately declined:
+# those also migrate the action internals to ESM, which is more churn than the
+# runtime bump needs. Bump past v5 only for something you actually want.
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -65,9 +71,9 @@ jobs:
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup target add wasm32-unknown-unknown
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -103,7 +109,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - run: rustup target add wasm32-unknown-unknown
 
@@ -113,7 +119,7 @@ jobs:
           curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
             | tar -xzf- -C /usr/local/bin
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -122,7 +128,10 @@ jobs:
             target
           key: cargo-wasm-${{ hashFiles('Cargo.lock') }}
 
-      - uses: actions/configure-pages@v5
+      # Enables Pages on a repo where it has never been turned on, which
+      # deploy-pages then depends on. Its base_path/base_url outputs are
+      # deliberately unused - the subpath is handled by --public-url below.
+      - uses: actions/configure-pages@v6
 
       # Trunk must run from inside app/ - virtual workspace, see CLAUDE.md.
       # --public-url makes the emitted asset hrefs relative so they resolve
@@ -131,12 +140,12 @@ jobs:
         working-directory: app
         run: trunk build --release --public-url ./
 
-      # Belt and braces; the Pages Actions path doesn't run Jekyll anyway.
-      - run: touch app/dist/.nojekyll
-
-      - uses: actions/upload-pages-artifact@v3
+      # No `.nojekyll` step: the Pages Actions path never runs Jekyll, and v4+
+      # drops dotfiles unless `include-hidden-files` is set - so the old `touch`
+      # was both unnecessary and, after this bump, silently ineffective.
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: app/dist
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
