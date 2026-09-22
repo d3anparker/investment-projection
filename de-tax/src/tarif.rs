@@ -309,7 +309,12 @@ impl Tarif {
         let mut net = zero;
         let mut rung_limited = false;
 
-        // Iterate segments from the one holding `booked` upward.
+        // Iterate segments from the one holding `booked` upward. Only a segment
+        // walked to its own `upper` hands over to the next: one cut short (by
+        // the cap or the pot ceiling) ends the walk, because the next segment's
+        // formula evaluated below its `lower` extrapolates backwards and can
+        // under-read the rate (see
+        // `a_rate_cap_never_lets_the_rate_exceed_it_across_a_soli_regime_change`).
         let start = self.segs.iter().position(|s| s.upper.map_or(true, |u| booked < u)).unwrap_or(0);
         for s in &self.segs[start..] {
             if net >= net_wanted || i >= i_max {
@@ -336,8 +341,11 @@ impl Tarif {
                 }
             }
 
+            let cut_short = s.upper.map_or(true, |u| seg_hi < u);
+            // A segment entered at its `lower` is never empty, so a zero-width
+            // one here was cut short at `i` (the cap binds exactly where we are).
             if seg_hi <= i {
-                continue;
+                break;
             }
 
             // net(Δ) = Δ/leak − [C(i+Δ) − C(i)], quadratic in the income
@@ -377,18 +385,21 @@ impl Tarif {
             // Consume the whole segment and carry on.
             net += net_full;
             i = seg_hi;
-            if s.upper.is_some() && seg_hi < i_max {
-                if matches!(stop, StopAt::NextRung) {
-                    rung_limited = true;
-                    break;
-                }
-            } else {
-                // Reached the pot ceiling, not a rate boundary.
+            if cut_short || i >= i_max {
+                // Stopped inside the segment, or the pot ran dry exactly at
+                // its end: either way not a rate boundary to step over.
+                break;
+            }
+            if matches!(stop, StopAt::NextRung) {
+                rung_limited = true;
                 break;
             }
         }
 
-        let gross = (i - booked) / leak;
+        // At the pot ceiling return `available` exactly: `(i_max - booked) / leak`
+        // need not round-trip, and the dust would defeat `calc`'s exact-zero
+        // depletion check (see `draining_a_pot_to_its_ceiling_leaves_no_residual_dust`).
+        let gross = if i >= i_max { available } else { (i - booked) / leak };
         let taxable = i - booked;
         let tax = self.charge_at(i) - charge0;
         Ok(Walk {
@@ -412,6 +423,23 @@ mod tests {
         let b: Decimal = b.parse().unwrap();
         let diff = (a - b).abs();
         assert!(diff < Decimal::new(5, 2), "expected ~{b}, got {a}");
+    }
+
+    /// A fully taxable (leak 1) walk from `booked` under a `cap`, asserting it
+    /// was cap-limited and stopped where the true marginal rate is still at
+    /// most the cap.
+    fn capped_walk(tt: &Tarif, booked: Decimal, cap: Decimal) -> Walk {
+        let w = tt
+            .walk(booked, Decimal::ONE, Decimal::from(2_000_000i64), Decimal::from(2_000_000i64), StopAt::RateAbove(cap))
+            .unwrap();
+        assert!(w.draw.rung_limited, "the cap must bite");
+        let reached = booked + w.taxable; // leak 1 → income == booked + taxable
+        let rate = tt.marginal_rate_at(reached);
+        assert!(
+            rate <= cap + Decimal::new(1, 4),
+            "stopped at income {reached}, where the true marginal rate is {rate} \u{2014} above the {cap} cap"
+        );
+        w
     }
 
     // --- the four transcription-guard invariants ---------------------------
@@ -525,15 +553,8 @@ mod tests {
 
     #[test]
     fn a_rate_cap_keeps_the_draw_below_the_capped_marginal_rate() {
-        let tt = t();
         // Cap the marginal at 30%: the draw must stop where dC/di reaches 0.30.
-        let w = tt
-            .walk(Decimal::ZERO, Decimal::ONE, Decimal::from(2_000_000i64), Decimal::from(1_000_000i64), StopAt::RateAbove(Decimal::new(30, 2)))
-            .unwrap();
-        assert!(w.draw.rung_limited, "the cap must bite");
-        // At the stopping income the marginal rate is essentially the cap.
-        let reached = w.taxable; // booked 0, leak 1 → income == taxable
-        assert!(tt.marginal_rate_at(reached) <= Decimal::new(3001, 4));
+        capped_walk(&t(), Decimal::ZERO, Decimal::new(30, 2));
     }
 
     // --- splitting and uprating -------------------------------------------
@@ -577,5 +598,92 @@ mod tests {
         let lhs = ks9.charge_at(x);
         let rhs = plain.charge_at(x) * Decimal::new(109, 2);
         assert!((lhs - rhs).abs() < Decimal::new(2, 2), "church: {lhs} vs {rhs}");
+    }
+
+    // --- regression: exact ceiling, and a cap inside a regime change -------
+
+    #[test]
+    fn draining_a_pot_to_its_ceiling_leaves_no_residual_dust() {
+        // A leak that is not exactly invertible in `Decimal` (a repeating
+        // eleventh) is what exposes this: `gross` derived as `(i - booked) /
+        // leak` does not reconstruct `available` bit-for-bit once the walk
+        // reaches the pot ceiling, because dividing back out an approximation
+        // of a repeating decimal is not the exact inverse of the
+        // multiplication (`leak * available`) that produced `i_max` —
+        // confirmed directly: `(leak * 1_234_567) / leak` computes to
+        // `1234567.0000000000000000000001`, not `1234567` on the nose.
+        // `calc`'s depletion detection compares the raw (unrounded) *total*
+        // to exactly zero, so a residual dust amount here silently reads as
+        // "never runs dry".
+        let tt = t();
+        let leak = Decimal::ONE / Decimal::from(11i64);
+        let available = Decimal::from(1_234_567i64);
+        // Ask for far more than the pot could ever deliver, so the walk is
+        // driven all the way to the pot ceiling rather than stopping partway.
+        let w = tt
+            .walk(Decimal::ZERO, leak, available, Decimal::from(100_000_000i64), StopAt::Requirement)
+            .unwrap();
+        assert_eq!(
+            w.draw.gross, available,
+            "a fully drained pot must report exactly what it held, not a residual dust amount"
+        );
+    }
+
+    /// A synthetic `TaxYear` whose zone-2 progression is wide and steep
+    /// enough that both Soli cut points (the Freigrenze and the
+    /// Milderungszone switch) land *inside* it, rather than in the flat
+    /// zone 4/5 they sit in under the real tables at rest — the shape a
+    /// large enough threshold uprate can produce (see the CLAUDE.md note on
+    /// `tarif.rs`, and `uprating_stretches_the_tariff_onto_wheels` above).
+    /// Every field `Tarif::build` does not read is copied from the real
+    /// `LATEST` table so the struct stays a valid `TaxYear`.
+    fn synthetic_zone2_tax_year() -> TaxYear {
+        TaxYear {
+            grundfreibetrag_eur: 0,
+            zone2_top_eur: 1_000_000,
+            zone3_top_eur: 2_000_000,
+            zone4_top_eur: 3_000_000,
+            // rate(x) = 8e-7·x + 0.10: 10% at income 0, rising to 90% at
+            // 1,000,000 — steep enough that both Soli cuts fall inside it.
+            zone2_a_cents: 4_000,
+            zone2_b_cents: 100_000,
+            zone3_a_cents: 0,
+            // A flat, deliberately high continuation past zone 2. A zero-rate
+            // zone here would mask the bug the way the real tables' flat 42%
+            // zone 4 does (see the test below): if the walk wrongly carries
+            // on past the cap and reaches this zone, it must land on a rate
+            // that is unmistakably still above the cap, not a rate so low it
+            // looks harmless by accident.
+            zone3_b_cents: 900_000,
+            zone3_c_cents: 0,
+            zone4_sub_cents: 0,
+            zone5_sub_cents: 0,
+            upper_rate_bp: 0,
+            top_rate_bp: 0,
+            soli_bp: 550,
+            soli_freigrenze_eur: 150_000,
+            soli_milderung_bp: 1190,
+            ..*LATEST
+        }
+    }
+
+    #[test]
+    fn a_rate_cap_never_lets_the_rate_exceed_it_across_a_soli_regime_change() {
+        // The Milderungszone's marginal add-on (11.9%) is *higher* than the
+        // flat rate (5.5%) it settles to, so a cap that truncates the walk
+        // mid-Milderungszone and then (wrongly) evaluates the *next*,
+        // lower-multiplier segment's formula at that same income reads a
+        // rate *below* the cap, even though the true rate there is exactly
+        // the cap. The walk must stop the instant the cap is reached,
+        // wherever inside a segment that happens to fall.
+        let ty = synthetic_zone2_tax_year();
+        let tt = Tarif::build(&ty, 0, false, Decimal::ONE).unwrap();
+        let cap = Decimal::new(60, 2); // 60%, chosen to land inside the Milderungszone.
+        let first = capped_walk(&tt, Decimal::ZERO, cap);
+        // A follow-up draw booked exactly where the cap stopped the first (how
+        // monthly draws stack income) starts at a zero-width capped segment: it
+        // must take nothing more rather than step into the next one.
+        let again = capped_walk(&tt, first.taxable, cap);
+        assert_eq!(again.draw.gross, Decimal::ZERO);
     }
 }
