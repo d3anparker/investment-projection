@@ -274,13 +274,11 @@ table {
   padding: 0 6px 8px;
 }
 
-/* investment editor: stacked labelled cards (mobile) → aligned grid (desktop) */
-.inv-head {
-  display: none;
-}
-
+/* investment editor: a labelled card per holding, at every width and in every
+   mode — its fields, then its remove button. Stacked on a phone; from 620px
+   the fields form a grid and the button is a rail down the card's right edge
+   (below). */
 .inv-row {
-  position: relative;
   display: grid;
   gap: 12px;
   padding: 14px;
@@ -288,6 +286,11 @@ table {
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 10px;
+}
+
+.inv-fields {
+  display: grid;
+  gap: 12px;
 }
 
 .fld {
@@ -344,57 +347,61 @@ table {
   padding-right: 20px;
 }
 
+/* The same card serves every mode, so switching mode only adds or removes
+   fields and never moves the ones that stay. It lays out against the editor's
+   own width, not the viewport's: the editor is at its narrowest in the
+   two-column desktop layout, not on the smallest screen that gets this one. */
 @media (min-width: 620px) {
-  .inv-head,
+  .inv-editor {
+    container-type: inline-size;
+  }
+
+  /* Two columns: the fields, and the remove rail. The card clips, so the
+     rail's hover fill follows its rounded corners; `hidden` first for browsers
+     without `clip` (the card never scrolls, so the two are the same here). */
   .inv-row {
-    display: grid;
-    /* Name / value today / monthly deposit / annual return / remove. Weighted
-       by how long each field's content runs, except the rate track, which
-       carries a px floor instead of just its share: the `%` adornment and the
-       input padding cost a fixed ~32px, so on its share alone the rate field
-       showed 28px of text at the narrowest two-column window — less than the
-       29px "7.25" needs, let alone the 38px of "12.75". The floor only binds
-       between about 960 and 1010px; wider (and in the single-column layout
-       below 960px) the 1fr share already exceeds it, so the other tracks keep
-       their full width. */
-    grid-template-columns:
-      minmax(0, 1.35fr) minmax(0, 1.35fr) minmax(0, 1.05fr) minmax(78px, 1fr) auto;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .inv-head {
-    padding: 0 0 6px;
-  }
-
-  .inv-head span {
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--muted);
-    font-weight: 600;
-  }
-
-  .inv-row {
+    grid-template-columns: minmax(0, 1fr) 54px;
+    gap: 0;
     padding: 0;
-    margin-bottom: 8px;
-    background: none;
-    border: 0;
-    border-radius: 0;
-  }
-
-  /* header row already labels the columns; hide per-field labels visually
-     but keep them in the accessibility tree as each input's name */
-  .fld-lbl {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
     overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
+    overflow: clip;
+  }
+
+  /* Narrow editor: two fields a row. Name and value, deposit and rate, then
+     account and cost while drawing down. */
+  .inv-fields {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+    align-items: end;
+    padding: 12px 8px 12px 12px;
+  }
+
+  /* Already drawing, there is no deposit box: the name takes its track, so
+     the card's rows stay full in either layout. */
+  .inv-fields:not(:has(.fld-deposit)) .fld-name {
+    grid-column: span 2;
+  }
+
+  /* Wide editor: name, value, deposit and rate on one line, weighted by how
+     long each one's content runs, with the account (two tracks, since its
+     labels such as "Workplace DC" run longest) and cost beneath them while
+     drawing down.
+
+     610px is where "Monthly deposit" and "Annual return" still fit their
+     tracks on one line once the card's padding and the rail are paid for.
+     Below it they wrap and the name box truncates, and two a row reads
+     better, so on a two-column desktop this is the widest windows only. It is
+     also why the rate track needs no px floor for its `%` adornment: from
+     here its share is over 100px. */
+  @container (min-width: 610px) {
+    .inv-fields {
+      grid-template-columns:
+        minmax(0, 1.35fr) minmax(0, 1.35fr) minmax(0, 1.05fr) minmax(0, 1fr);
+    }
+
+    .inv-fields .fld-account {
+      grid-column: span 2;
+    }
   }
 }
 
@@ -507,23 +514,36 @@ input[type="number"]::-webkit-inner-spin-button {
   border-color: var(--bad);
 }
 
-/* desktop: collapse to a compact icon button in the grid's last column */
+/* From 620px the button *is* the card's second column: a rail from the divider
+   (its own left border) to the card's edges, stretched to however many rows
+   the fields take. The whole strip is the hit target, so it needs no overlay. */
 @media (min-width: 620px) {
   .btn-remove {
-    width: 30px;
-    height: 30px;
-    padding: 0;
+    justify-self: stretch;
     justify-content: center;
+    padding: 0;
     background: transparent;
-    border-color: transparent;
+    border-width: 0 0 0 1px;
+    border-radius: 0;
+  }
+
+  .btn-remove::after {
+    content: none;
   }
 
   .btn-remove .rm-label {
     display: none;
   }
 
+  /* Tinted, but the divider keeps its colour rather than turning red. */
   .btn-remove:hover {
-    border-color: var(--bad);
+    background: var(--bad-soft);
+    border-color: var(--line);
+  }
+
+  /* Drawn inside: the card clips, so an outside ring would be cut off. */
+  .btn-remove:focus-visible {
+    outline-offset: -3px;
   }
 }
 
@@ -916,55 +936,6 @@ input[type="number"]::-webkit-inner-spin-button {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
-}
-
-/* Drawdown mode adds an account picker to every row, and a cost box to some of
-   them — seven fields where the aligned grid above was already tight enough to
-   need a px floor on the rate track. Rather than squeeze two more columns in,
-   the row falls back to the labelled-card layout the mobile breakpoint already
-   uses: it handles any number of fields, the labels stay visible so nothing
-   depends on a header row lining up, and drawdown is exactly when a row has more
-   to say. The shared header is dropped with it, since it could no longer
-   describe the columns. */
-.inv-editor.with-accounts .inv-head {
-  display: none;
-}
-
-@media (min-width: 620px) {
-  .inv-editor.with-accounts .inv-row {
-    /* Auto-fit rather than a fixed template: the cost field is conditional, so
-       the track count varies row by row and between rows in the same list. */
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    align-items: end;
-    padding: 12px;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    margin-bottom: 10px;
-  }
-
-  /* Restore the visible labels the aligned layout hides: without a header row
-     they are the only thing naming each field. */
-  .inv-editor.with-accounts .fld-lbl {
-    position: static;
-    width: auto;
-    height: auto;
-    margin: 0 0 4px;
-    clip: auto;
-    clip-path: none;
-    overflow: visible;
-    white-space: normal;
-  }
-
-  /* The remove button sits with the fields rather than in a track of its own. */
-  .inv-editor.with-accounts .btn-remove {
-    align-self: end;
-  }
-}
-
-.fld-account select,
-.fld-basis input {
-  width: 100%;
 }
 
 /* the withdrawal order and the tax details it needs */

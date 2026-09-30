@@ -302,6 +302,84 @@ async fn remove_buttons_name_the_holding_they_remove() {
 }
 
 #[wasm_bindgen_test]
+async fn the_remove_button_is_the_same_rail_on_every_card_in_every_mode() {
+    // Whatever fields a card holds and whatever the mode, its button is a rail
+    // down the card's right edge: the same x on every card, the whole strip is
+    // the hit target, and it spans however many rows the card has.
+    assert!(
+        web_sys::window().unwrap().inner_width().unwrap().as_f64().unwrap() >= 620.0,
+        "the rail is the >=620px layout; the test window is narrower than that"
+    );
+    // The rail's x at each width, from every card in every mode: neither a cost
+    // box nor a change of mode may move it.
+    let mut rails: std::collections::BTreeMap<u32, Vec<f64>> = Default::default();
+    // (mode, field rows on a wide card, field rows on a narrow one)
+    for (plan, wide_rows, narrow_rows) in
+        [("deposits", 1, 2), ("drawdown", 2, 3), ("already-drawing", 2, 3)]
+    {
+        let mut costed = row("Brokerage", "25000", "6", "200");
+        costed.account_kind = gains_kind().id.into();
+        costed.cost_basis = "18000".into();
+        // The cost box shows only while drawing down. The cards depend on the
+        // mode alone, so the rest keeps the mount cheap: pro-rata, a one-year
+        // drawdown, and "how long it lasts" (one projection) rather than the
+        // default goal's bisection.
+        let mut s = taxed_state(vec![row("Pension", "146000", "8", "1160"), costed], "");
+        s.plan = plan.into();
+        s.drawdown_value = "1".into();
+        s.goal_kind = "lasts".into();
+        let root = harness::mount_with(&s);
+        harness::settle().await;
+
+        // The card lays out against the editor's own width, so the root's width
+        // picks the layout: four fields a row across the widest page, two a row
+        // when the editor is narrow. Both hold whether the test window puts
+        // the form beside the breakdown or above it. A width change is layout
+        // only, so one mount serves both.
+        for (width, field_rows) in [(1500, wide_rows), (600, narrow_rows)] {
+            root.set_attribute("style", &format!("width: {width}px")).unwrap();
+
+            let cards = harness::qa(&root, ".inv-row");
+            assert_eq!(cards.len(), 2);
+            for (i, card) in cards.iter().enumerate() {
+                let at = format!("{plan}, {width}px, card {i}");
+                let c = card.get_bounding_client_rect();
+                let b = harness::q(card, ".btn-remove").get_bounding_client_rect();
+                let fields: Vec<web_sys::DomRect> = harness::qa(card, ".fld")
+                    .iter()
+                    .map(|f| f.get_bounding_client_rect())
+                    .collect();
+                // Fields align to the foot of their grid row, so bottoms (not
+                // tops, which a wrapped label moves) count the rows.
+                let bottoms: std::collections::BTreeSet<i64> =
+                    fields.iter().map(|f| f.bottom().round() as i64).collect();
+                assert_eq!(bottoms.len(), field_rows, "{at}: field rows");
+                let fields_right = fields.iter().map(|f| f.right()).fold(f64::MIN, f64::max);
+                assert!(b.left() > fields_right, "{at}: button sits beside the fields, not among them");
+                // The card's 1px border is the only thing outside the button.
+                assert!(
+                    (b.height() - (c.height() - 2.0)).abs() <= 1.0,
+                    "{at}: button runs the card's full height ({} of {})",
+                    b.height(),
+                    c.height()
+                );
+                assert!(
+                    (b.right() - (c.right() - 1.0)).abs() <= 1.0,
+                    "{at}: button reaches the card's right edge"
+                );
+                rails.entry(width).or_default().push(b.left());
+            }
+        }
+    }
+    for (width, xs) in rails {
+        assert!(
+            xs.iter().all(|x| (x - xs[0]).abs() < 0.5),
+            "{width}px: a cost box or a mode moved the rail {xs:?}"
+        );
+    }
+}
+
+#[wasm_bindgen_test]
 async fn typing_mid_string_does_not_bounce_the_caret() {
     // bind_value writes the DOM value only when it differs from the signal, so a
     // mid-string edit keeps the caret where the user left it.
@@ -600,6 +678,14 @@ fn kinds() -> &'static [taxkit::AccountKind] {
     seeded_system().account_kinds()
 }
 
+/// A kind taxed on the gain, so a holding in it shows the cost box.
+fn gains_kind() -> &'static taxkit::AccountKind {
+    kinds()
+        .iter()
+        .find(|k| k.needs_cost_basis)
+        .expect("some kind is taxed on the gain")
+}
+
 #[wasm_bindgen_test]
 async fn the_account_select_offers_exactly_what_the_tax_system_advertises() {
     // Asserted against the catalogue rather than a written-out list, so the
@@ -633,10 +719,7 @@ async fn a_seeded_account_shows_the_seeded_value_not_the_first_option() {
 async fn the_cost_box_follows_the_account_flag_not_a_named_wrapper() {
     // Shown for kinds whose `needs_cost_basis` is set, and only those — driven
     // by the catalogue flag, never by matching an account id in the markup.
-    let wants = kinds()
-        .iter()
-        .find(|k| k.needs_cost_basis)
-        .expect("some kind is taxed on the gain");
+    let wants = gains_kind();
     let plain = kinds()
         .iter()
         .find(|k| !k.needs_cost_basis)
@@ -663,9 +746,7 @@ async fn the_cost_box_follows_the_account_flag_not_a_named_wrapper() {
 #[wasm_bindgen_test]
 async fn the_account_picker_is_drawdown_only() {
     // In deposits mode the account changes nothing about the numbers, so an
-    // inert control that looks like it matters would be worse than none — and
-    // hiding it keeps the aligned four-field row exactly as it was before
-    // accounts existed.
+    // inert control that looks like it matters would be worse than none.
     let deposits =
         harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
     assert!(harness::q_opt(&deposits, ".fld-account").is_none());

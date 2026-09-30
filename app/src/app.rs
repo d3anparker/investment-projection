@@ -539,14 +539,7 @@ pub fn App() -> impl IntoView {
 
                 <section class="panel">
                     <h2>"Your investments"</h2>
-                    <div class="inv-editor" class:with-accounts=is_drawdown>
-                        <div class="inv-head" aria-hidden="true">
-                            <span>"Name"</span>
-                            <span>"Value today"</span>
-                            <span>"Monthly deposit"</span>
-                            <span>"Annual return"</span>
-                            <span></span>
-                        </div>
+                    <div class="inv-editor">
                         <For each=move || rows.get() key=|r| r.id children=move |r| {
                             // `node_ref` needs a plain `NodeRef` binding, so create
                             // the guarded refs as locals before the template.
@@ -571,128 +564,130 @@ pub fn App() -> impl IntoView {
                             let account_bad = flagged(InvestmentField::AccountKind);
                             view! {
                             <div class="inv-row">
-                                <label class="fld">
-                                    <span class="fld-lbl">"Name"</span>
-                                    <input
-                                        type="text" placeholder="e.g. Equity Fund"
-                                        node_ref=name_ref
-                                        on:input=move |ev| r.name.set(event_target_value(&ev)) />
-                                </label>
-                                <label class="fld">
-                                    <span class="fld-lbl">"Value today"</span>
-                                    <span class="adorn adorn-money">
+                                // The fields get a grid of their own, so the remove
+                                // button can be the card's second column (its rail).
+                                <div class="inv-fields">
+                                    <label class="fld fld-name">
+                                        <span class="fld-lbl">"Name"</span>
                                         <input
-                                            type="text" inputmode="decimal"
-                                            placeholder="10000"
-                                            node_ref=value_ref
-                                            aria-invalid=move || invalid_attrs(value_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(value_bad.get()).1
-                                            class:field-invalid=move || value_bad.get()
-                                            on:input=move |ev| r.value.set(event_target_value(&ev)) />
-                                    </span>
-                                </label>
-                                // Only while there is a growth phase for a deposit
-                                // to land in. Already drawing, the projection pays
-                                // nothing in (`build_input` sends "0"), so a box
-                                // here would be a control that changes nothing.
-                                // The ref is created inside the block so a fresh
-                                // binding applies the value when it (re)mounts.
-                                {move || has_growth().then(|| {
-                                    let contribution_ref = bind_value(r.contribution);
-                                    view! {
+                                            type="text" placeholder="e.g. Equity Fund"
+                                            node_ref=name_ref
+                                            on:input=move |ev| r.name.set(event_target_value(&ev)) />
+                                    </label>
                                     <label class="fld">
-                                        // The label wraps the input, so its visible
-                                        // text *is* the accessible name (WCAG 2.5.3) —
-                                        // no `aria-label` to override the on-screen
-                                        // "Monthly deposit".
-                                        <span class="fld-lbl">"Monthly deposit"</span>
+                                        <span class="fld-lbl">"Value today"</span>
                                         <span class="adorn adorn-money">
                                             <input
                                                 type="text" inputmode="decimal"
-                                                placeholder="100"
-                                                node_ref=contribution_ref
-                                                aria-invalid=move || invalid_attrs(contribution_bad.get()).0
-                                                aria-describedby=move || invalid_attrs(contribution_bad.get()).1
-                                                class:field-invalid=move || contribution_bad.get()
-                                                on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
+                                                placeholder="10000"
+                                                node_ref=value_ref
+                                                aria-invalid=move || invalid_attrs(value_bad.get()).0
+                                                aria-describedby=move || invalid_attrs(value_bad.get()).1
+                                                class:field-invalid=move || value_bad.get()
+                                                on:input=move |ev| r.value.set(event_target_value(&ev)) />
                                         </span>
                                     </label>
-                                    }
-                                })}
-                                <label class="fld">
-                                    <span class="fld-lbl">"Annual return"</span>
-                                    <span class="adorn adorn-pct">
-                                        <input
-                                            type="text" inputmode="decimal"
-                                            placeholder="7"
-                                            node_ref=rate_ref
-                                            aria-invalid=move || invalid_attrs(rate_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(rate_bad.get()).1
-                                            class:field-invalid=move || rate_bad.get()
-                                            on:input=move |ev| r.rate.set(event_target_value(&ev)) />
-                                    </span>
-                                </label>
-                                // Drawdown-only, like the cost box below it. In
-                                // deposits mode the account changes nothing about
-                                // the numbers, and an inert control that looks
-                                // like it matters is worse than no control — it
-                                // also keeps the aligned four-field row exactly
-                                // as it was before accounts existed.
-                                {move || (is_drawdown()).then(|| {
-                                    // Reading `jurisdiction` here rebuilds the whole
-                                    // `<select>` node when the jurisdiction changes, so its
-                                    // option set never *swaps* under a persistent control
-                                    // (which the browser would reset). Options come from the
-                                    // active catalogue, and `selected=` (not `prop:value`)
-                                    // drives it, since a select's props are set before its
-                                    // options exist.
-                                    let kinds = active_sys().account_kinds();
-                                    view! {
-                                    <label class="fld fld-account">
-                                        <span class="fld-lbl">"Account"</span>
-                                        <select
-                                            aria-invalid=move || invalid_attrs(account_bad.get()).0
-                                            aria-describedby=move || invalid_attrs(account_bad.get()).1
-                                            class:field-invalid=move || account_bad.get()
-                                            on:change=move |ev| r.account_kind.set(event_target_value(&ev))>
-                                            {kinds.iter().map(|k| view! {
-                                                <option
-                                                    value=k.id
-                                                    title=k.note
-                                                    selected=move || r.account_kind.get() == k.id>
-                                                    {k.short_label}
-                                                </option>
-                                            }).collect_view()}
-                                        </select>
-                                    </label>
-                                    }
-                                })}
-                                // Only for kinds that are taxed on the gain, and asked
-                                // of the catalogue rather than matched against a named
-                                // wrapper — so no jurisdiction leaks into the markup.
-                                {move || {
-                                    let needs = active_sys()
-                                        .account_kind(&r.account_kind.get())
-                                        .is_some_and(|k| k.needs_cost_basis);
-                                    (needs && is_drawdown()).then(|| {
-                                        let basis_ref = bind_value(r.cost_basis);
+                                    // Only while there is a growth phase for a deposit
+                                    // to land in. Already drawing, the projection pays
+                                    // nothing in (`build_input` sends "0"), so a box
+                                    // here would be a control that changes nothing.
+                                    // The ref is created inside the block so a fresh
+                                    // binding applies the value when it (re)mounts.
+                                    {move || has_growth().then(|| {
+                                        let contribution_ref = bind_value(r.contribution);
                                         view! {
-                                            <label class="fld fld-basis">
-                                                <span class="fld-lbl">"Cost"</span>
-                                                <span class="adorn adorn-money">
-                                                    <input
-                                                        type="text" inputmode="decimal"
-                                                        placeholder="what it cost"
-                                                        node_ref=basis_ref
-                                                        aria-invalid=move || invalid_attrs(basis_bad.get()).0
-                                                        aria-describedby=move || invalid_attrs(basis_bad.get()).1
-                                                        class:field-invalid=move || basis_bad.get()
-                                                        on:input=move |ev| r.cost_basis.set(event_target_value(&ev)) />
-                                                </span>
-                                            </label>
+                                        <label class="fld fld-deposit">
+                                            // The label wraps the input, so its visible
+                                            // text *is* the accessible name (WCAG 2.5.3) —
+                                            // no `aria-label` to override the on-screen
+                                            // "Monthly deposit".
+                                            <span class="fld-lbl">"Monthly deposit"</span>
+                                            <span class="adorn adorn-money">
+                                                <input
+                                                    type="text" inputmode="decimal"
+                                                    placeholder="100"
+                                                    node_ref=contribution_ref
+                                                    aria-invalid=move || invalid_attrs(contribution_bad.get()).0
+                                                    aria-describedby=move || invalid_attrs(contribution_bad.get()).1
+                                                    class:field-invalid=move || contribution_bad.get()
+                                                    on:input=move |ev| r.contribution.set(event_target_value(&ev)) />
+                                            </span>
+                                        </label>
                                         }
-                                    })
-                                }}
+                                    })}
+                                    <label class="fld">
+                                        <span class="fld-lbl">"Annual return"</span>
+                                        <span class="adorn adorn-pct">
+                                            <input
+                                                type="text" inputmode="decimal"
+                                                placeholder="7"
+                                                node_ref=rate_ref
+                                                aria-invalid=move || invalid_attrs(rate_bad.get()).0
+                                                aria-describedby=move || invalid_attrs(rate_bad.get()).1
+                                                class:field-invalid=move || rate_bad.get()
+                                                on:input=move |ev| r.rate.set(event_target_value(&ev)) />
+                                        </span>
+                                    </label>
+                                    // Drawdown-only, like the cost box below it. In
+                                    // deposits mode the account changes nothing about
+                                    // the numbers, and an inert control that looks
+                                    // like it matters is worse than no control.
+                                    {move || (is_drawdown()).then(|| {
+                                        // Reading `jurisdiction` here rebuilds the whole
+                                        // `<select>` node when the jurisdiction changes, so its
+                                        // option set never *swaps* under a persistent control
+                                        // (which the browser would reset). Options come from the
+                                        // active catalogue, and `selected=` (not `prop:value`)
+                                        // drives it, since a select's props are set before its
+                                        // options exist.
+                                        let kinds = active_sys().account_kinds();
+                                        view! {
+                                        <label class="fld fld-account">
+                                            <span class="fld-lbl">"Account"</span>
+                                            <select
+                                                aria-invalid=move || invalid_attrs(account_bad.get()).0
+                                                aria-describedby=move || invalid_attrs(account_bad.get()).1
+                                                class:field-invalid=move || account_bad.get()
+                                                on:change=move |ev| r.account_kind.set(event_target_value(&ev))>
+                                                {kinds.iter().map(|k| view! {
+                                                    <option
+                                                        value=k.id
+                                                        title=k.note
+                                                        selected=move || r.account_kind.get() == k.id>
+                                                        {k.short_label}
+                                                    </option>
+                                                }).collect_view()}
+                                            </select>
+                                        </label>
+                                        }
+                                    })}
+                                    // Only for kinds that are taxed on the gain, and asked
+                                    // of the catalogue rather than matched against a named
+                                    // wrapper — so no jurisdiction leaks into the markup.
+                                    {move || {
+                                        let needs = active_sys()
+                                            .account_kind(&r.account_kind.get())
+                                            .is_some_and(|k| k.needs_cost_basis);
+                                        (needs && is_drawdown()).then(|| {
+                                            let basis_ref = bind_value(r.cost_basis);
+                                            view! {
+                                                <label class="fld fld-basis">
+                                                    <span class="fld-lbl">"Cost"</span>
+                                                    <span class="adorn adorn-money">
+                                                        <input
+                                                            type="text" inputmode="decimal"
+                                                            placeholder="what it cost"
+                                                            node_ref=basis_ref
+                                                            aria-invalid=move || invalid_attrs(basis_bad.get()).0
+                                                            aria-describedby=move || invalid_attrs(basis_bad.get()).1
+                                                            class:field-invalid=move || basis_bad.get()
+                                                            on:input=move |ev| r.cost_basis.set(event_target_value(&ev)) />
+                                                    </span>
+                                                </label>
+                                            }
+                                        })
+                                    }}
+                                </div>
                                 <button
                                     class="btn btn-remove"
                                     title=move || remove_label(r, rows)
