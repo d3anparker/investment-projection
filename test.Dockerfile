@@ -21,8 +21,12 @@ RUN curl -fsSL "https://github.com/mozilla/geckodriver/releases/download/${GECKO
 # refuses the module ("schema version mismatch"). Derive the version from
 # Cargo.lock so there is no fourth constant to keep in step. Prefer the prebuilt
 # binary; fall back to a from-source install if the release layout ever differs.
+# Carriage returns are stripped first: a Windows checkout (core.autocrlf) gives
+# Cargo.lock CRLF endings, and the `$` anchor would then match nothing, leaving
+# an empty version that surfaced only as a 404 and a bad `--version ''`.
 COPY Cargo.lock /tmp/Cargo.lock
-RUN WB=$(grep -A1 '^name = "wasm-bindgen"$' /tmp/Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2) \
+RUN WB=$(tr -d '\r' < /tmp/Cargo.lock | grep -A1 '^name = "wasm-bindgen"$' | grep '^version' | head -1 | cut -d'"' -f2) \
+ && if [ -z "${WB}" ]; then echo "no wasm-bindgen version found in Cargo.lock" >&2; exit 1; fi \
  && echo "wasm-bindgen ${WB}" \
  && ( curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WB}/wasm-bindgen-${WB}-x86_64-unknown-linux-musl.tar.gz" \
         | tar -xzf- --strip-components=1 -C /usr/local/bin \
