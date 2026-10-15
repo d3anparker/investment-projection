@@ -566,6 +566,31 @@ pub(crate) struct Run {
     /// caller (which cannot tell the two phases apart).
     pub(crate) unused_allowance: Decimal,
     pub(crate) rate_cap_breached: bool,
+    /// The gross each drawdown month took from each holding, raw, in order —
+    /// but only when the caller asked [`project`] to record it. Empty
+    /// otherwise, so the goal-seek solvers, which run the whole projection tens
+    /// of thousands of times, never pay for a table nobody reads. The month's
+    /// tax and charge are not recorded here: the cumulative `taxed` and
+    /// `charges_cum` series already hold them.
+    pub(crate) months: Vec<Vec<Decimal>>,
+}
+
+/// What one drawdown month moved, raw and unrounded: the gross taken from each
+/// holding (parallel to the prepared holdings), the tax on it, and the periodic
+/// charge levied at that month's step. [`crate::schedule`] rounds it for
+/// display; nothing else reads it.
+pub(crate) struct MonthFlows {
+    pub(crate) gross: Vec<Decimal>,
+    pub(crate) tax: Decimal,
+    pub(crate) charged: Decimal,
+}
+
+/// What a recorded run hands [`crate::schedule`] beside the output: each
+/// drawdown month's flows (empty unless recording), and the monthly withdrawal
+/// as parsed, so the schedule can restate it without a second parse.
+pub(crate) struct Recording {
+    pub(crate) months: Vec<MonthFlows>,
+    pub(crate) withdrawal: Decimal,
 }
 
 /// Advance the whole portfolio month by month across both phases.
@@ -580,6 +605,10 @@ pub(crate) struct Run {
 /// for the rules-label figures the ledger holds. The unused-allowance figure is
 /// *not* among them: it has to be measured from the handover, which only this
 /// function knows where to find.
+///
+/// `record` asks for [`Run::months`] — each drawdown month's per-holding flows.
+/// Only the schedule wants them; every solver passes `false`, which allocates
+/// nothing extra.
 pub(crate) fn project(
     prepared: &[Prepared],
     horizon_months: u32,
@@ -589,6 +618,7 @@ pub(crate) fn project(
     groups: &[Vec<usize>],
     rate_cap: Option<Decimal>,
     plan: &mut SessionPlan,
+    record: bool,
 ) -> Result<Run, CalcError> {
     let SessionPlan { session, charging } = plan;
     let charging = *charging;
@@ -668,6 +698,13 @@ pub(crate) fn project(
     let mut accounts_touched: Vec<usize> = Vec::new();
     let mut period_kinds: Vec<&str> = Vec::new();
     let mut rate_cap_breached = false;
+    // The schedule's per-month record, and the scratch it diffs against: each
+    // holding's cumulative withdrawal as the drawdown month opened. Both stay
+    // empty unless asked for.
+    let mut months: Vec<Vec<Decimal>> =
+        Vec::with_capacity(if record { drawdown_months as usize } else { 0 });
+    let mut withdrawn_before: Vec<Decimal> =
+        if record { vec![Decimal::ZERO; n] } else { Vec::new() };
 
     // Portfolio series, one point per month inclusive of both endpoints.
     let mut totals: Vec<Decimal> = vec![Decimal::ZERO; total + 1];
@@ -837,6 +874,9 @@ pub(crate) fn project(
             // for pro-rata (no session, gross == net).
 
             before.copy_from_slice(&balances);
+            if record {
+                withdrawn_before.copy_from_slice(&withdrawn);
+            }
             let mut led = Ledger {
                 prepared,
                 balances: &mut balances,
@@ -877,6 +917,13 @@ pub(crate) fn project(
                 }
             }
             tax_total = taxes.iter().sum();
+
+            // What left each holding this month, for the schedule. Diffed off
+            // the cumulative ledger, so it is exactly the movement every total
+            // above was built from.
+            if record {
+                months.push((0..n).map(|j| withdrawn[j] - withdrawn_before[j]).collect());
+            }
         }
     }
 
@@ -944,12 +991,24 @@ pub(crate) fn project(
         period_months,
         unused_allowance,
         rate_cap_breached,
+        months,
     })
 }
 
 /// Project a portfolio forward. Returns a user-facing message on any invalid
 /// input rather than panicking.
 pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
+    calculate_recorded(input, false).map(|(out, _)| out)
+}
+
+/// [`calculate`], optionally keeping each drawdown month's raw per-holding
+/// flows alongside the output (empty unless `record`). The one body both
+/// [`calculate`] and [`crate::schedule`] run, so a schedule's `output` is the
+/// projection itself rather than a second computation that could drift from it.
+pub(crate) fn calculate_recorded(
+    input: &CalcInput,
+    record: bool,
+) -> Result<(CalcOutput, Recording), CalcError> {
     if input.investments.is_empty() {
         return Err(CalcError::new("Add at least one investment.", None));
     }
@@ -996,6 +1055,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         period_months,
         unused_allowance,
         rate_cap_breached,
+        months,
     } = project(
         &prepared,
         horizon_months,
@@ -1005,7 +1065,26 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         &groups,
         pp.rate_cap,
         &mut plan,
+        record,
     )?;
+
+    // Each recorded drawdown month: the per-holding gross the loop kept, with
+    // the month's tax and periodic charge differenced off the cumulative series
+    // — one definition of each, not a second accumulator beside them. Drawdown
+    // month `k` (from 0) is the loop's step `horizon + k`.
+    let months = months
+        .into_iter()
+        .enumerate()
+        .map(|(k, gross)| {
+            let i = horizon + k;
+            MonthFlows {
+                gross,
+                tax: taxed[i + 1] - taxed[i],
+                charged: charges_cum[i + 1] - charges_cum[i],
+            }
+        })
+        .collect();
+    let recording = Recording { months, withdrawal: pp.withdrawal };
 
     let series: Vec<Decimal> = totals.iter().map(|v| round2(*v)).collect();
     let contributions_series: Vec<Decimal> = contribs.iter().map(|v| round2(*v)).collect();
@@ -1090,7 +1169,7 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         .checked_div(withdrawn_total)
         .unwrap_or(Decimal::ZERO);
 
-    Ok(CalcOutput {
+    let output = CalcOutput {
         investments: results,
         series,
         contributions_series,
@@ -1120,5 +1199,6 @@ pub fn calculate(input: &CalcInput) -> Result<CalcOutput, CalcError> {
         rate_cap_breached,
         rules_label,
         rules_as_of,
-    })
+    };
+    Ok((output, recording))
 }

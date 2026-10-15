@@ -1577,7 +1577,7 @@ mod levy {
     /// The shared `taxed` context, pointed at the levying system. Built off it
     /// rather than re-spelled, so a new `TaxContext` field is one edit in this
     /// file rather than one per helper.
-    fn levy_ctx(options: Vec<(String, String)>) -> TaxContext {
+    pub(super) fn levy_ctx(options: Vec<(String, String)>) -> TaxContext {
         TaxContext { system: &MOCK_LEVY, options, ..taxed("0", "60") }
     }
 
@@ -1944,5 +1944,235 @@ mod levy {
         ))
         .unwrap();
         assert_eq!(out.unused_allowance_total, d("10000.00"), "ten drawdown years at 1,000 apiece");
+    }
+}
+
+// --- the month-by-month schedule ----------------------------------------------
+//
+// `schedule` reads the projection back month by month. What it must never do is
+// change the projection, and what it must always do is add up: a month to its
+// total, a year to its months. Pinned against the mock systems like everything
+// else here.
+mod schedule_tests {
+    use super::levy::levy_ctx;
+    use super::*;
+    use taxkit::mock::{FREE, FUND, GAINS, INCOME};
+
+    /// £6,000 and £4,000 at 0%, drawn from today at £1,000 a month: every month
+    /// splits 60/40, and the pot is gone after ten months.
+    fn sixty_forty(draw_months: &str) -> CalcInput {
+        drawdown(
+            vec![holding("A", "6000", "0", "0"), holding("B", "4000", "0", "0")],
+            "0",
+            Unit::Months,
+            draw_months,
+            Unit::Months,
+            "1000",
+        )
+    }
+
+    /// Every month of a schedule, in order.
+    fn months(s: &Schedule) -> Vec<&ScheduleMonth> {
+        s.years.iter().flat_map(|y| &y.months).collect()
+    }
+
+    #[test]
+    fn the_schedule_reads_back_the_projection_unchanged() {
+        // Recording the months is bookkeeping only; it must not move a figure.
+        for (name, strategy) in every_strategy() {
+            let input =
+                strategy_run(mixed_portfolio(), "12", "60", "2000", strategy, Some(taxed("0", "60")));
+            assert_eq!(schedule(&input).unwrap().output, calculate(&input).unwrap(), "{name}");
+        }
+        let charging = strategy_run(
+            vec![account("Fund", FUND, "300000", "5", "0")],
+            "24",
+            "36",
+            "1000",
+            Strategy::pro_rata(),
+            Some(levy_ctx(vec![])),
+        );
+        assert_eq!(schedule(&charging).unwrap().output, calculate(&charging).unwrap());
+        let untaxed = sixty_forty("24");
+        assert_eq!(schedule(&untaxed).unwrap().output, calculate(&untaxed).unwrap());
+    }
+
+    #[test]
+    fn a_sixty_forty_split_reads_to_the_penny() {
+        let s = schedule(&sixty_forty("24")).unwrap();
+        assert_eq!(s.withdrawal, d("1000"), "the withdrawal as calc parsed it");
+        assert_eq!(s.years.len(), 2);
+        let months = months(&s);
+        assert_eq!(months.len(), 24);
+        for m in &months[..10] {
+            let f = &m.figures;
+            assert_eq!(f.drawn, vec![d("600.00"), d("400.00")], "month {}", m.drawdown_month);
+            assert_eq!((f.gross, f.net, f.tax), (d("1000.00"), d("1000.00"), d("0.00")));
+        }
+        for (k, m) in months.iter().enumerate() {
+            assert_eq!(m.drawdown_month, k as u32 + 1, "months count from 1");
+            // No growth phase, so drawdown month k ends at series point k.
+            assert_eq!(m.figures.value_after, s.output.series[k + 1]);
+        }
+        assert_eq!(months[0].figures.value_after, d("9000.00"));
+        assert_eq!(months[9].figures.value_after, d("0.00"));
+        assert!(
+            months[10..]
+                .iter()
+                .all(|m| m.figures.gross.is_zero() && m.figures.drawn.iter().all(|c| c.is_zero())),
+            "nothing is left to take after month 10"
+        );
+        assert_eq!(s.runs_out, Some(RunsOut { month: 10, year: 1 }));
+        assert_eq!(s.years[0].figures.drawn, vec![d("6000.00"), d("4000.00")]);
+        assert_eq!(s.years[0].figures.value_after, d("0.00"));
+    }
+
+    #[test]
+    fn runs_out_counts_drawdown_months_not_series_points() {
+        // After a growth phase, `depletion_month` indexes the whole series; the
+        // schedule's figure must be the drawdown month, which is that less the
+        // growth period. Adding the growth period back would double-count it.
+        let mut input = sixty_forty("24");
+        input.horizon_value = "6".into();
+        let s = schedule(&input).unwrap();
+        assert_eq!(s.output.depletion_month, Some(16));
+        assert_eq!(s.runs_out, Some(RunsOut { month: 10, year: 1 }));
+        assert_eq!(s.years[0].months[0].figures.value_after, s.output.series[7]);
+        // A run-out in month 13 is in the second year: 10,000 at 800 a month
+        // leaves 400 for the thirteenth.
+        let late = drawdown(vec![holding("A", "10000", "0", "0")], "0", Unit::Months, "24", Unit::Months, "800");
+        assert_eq!(schedule(&late).unwrap().runs_out, Some(RunsOut { month: 13, year: 2 }));
+    }
+
+    #[test]
+    fn every_month_adds_up_and_every_year_is_its_months() {
+        for (name, strategy) in every_strategy() {
+            // Eighteen months: a whole year and a half one.
+            let s = schedule(&strategy_run(
+                mixed_portfolio(),
+                "12",
+                "18",
+                "2000",
+                strategy,
+                Some(taxed("0", "60")),
+            ))
+            .unwrap();
+            assert_eq!(s.years.len(), 2, "{name}");
+            assert_eq!(s.years[1].months.len(), 6, "{name}: the last year is the part left over");
+            for y in &s.years {
+                let mut drawn = vec![Decimal::ZERO; 3];
+                let (mut gross, mut tax, mut net) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+                for m in &y.months {
+                    let f = &m.figures;
+                    assert_eq!(f.drawn.iter().sum::<Decimal>(), f.gross, "{name}: month {}", m.drawdown_month);
+                    assert_eq!(f.gross, f.net + f.tax, "{name}: month {}", m.drawdown_month);
+                    assert!(f.drawn.iter().all(|c| *c >= Decimal::ZERO), "{name}: no negative cell");
+                    for (sum, c) in drawn.iter_mut().zip(&f.drawn) {
+                        *sum += *c;
+                    }
+                    gross += f.gross;
+                    tax += f.tax;
+                    net += f.net;
+                }
+                let f = &y.figures;
+                assert_eq!(f.drawn, drawn, "{name}: year {}", y.year);
+                assert_eq!((f.gross, f.tax, f.net), (gross, tax, net), "{name}: year {}", y.year);
+                assert_eq!(f.value_after, y.months.last().unwrap().figures.value_after);
+            }
+        }
+    }
+
+    #[test]
+    fn a_net_strategy_delivers_the_asked_for_net_every_month() {
+        let s = schedule(&strategy_run(
+            mixed_portfolio(),
+            "0",
+            "36",
+            "2000",
+            Strategy::cheapest_first(),
+            Some(taxed("0", "60")),
+        ))
+        .unwrap();
+        assert_eq!(s.runs_out, None, "the pot lasts the period, so every month is a full one");
+        for m in months(&s) {
+            assert_eq!(m.figures.net, d("2000.00"), "month {}", m.drawdown_month);
+            assert!(m.figures.gross >= m.figures.net);
+        }
+    }
+
+    #[test]
+    fn an_ordered_strategy_empties_one_kind_before_touching_the_next() {
+        // Gains first, then the free account, then income: the schedule is
+        // where that order becomes visible, so pin it here.
+        let s = schedule(&strategy_run(
+            mixed_portfolio(),
+            "0",
+            "60",
+            "2000",
+            Strategy::ordered(vec![GAINS.into(), FREE.into(), INCOME.into()]),
+            Some(taxed("0", "60")),
+        ))
+        .unwrap();
+        let months = months(&s);
+        // Holdings are Cash (free), Unwrapped (gains), Pension (income).
+        let drawn = |m: &ScheduleMonth, j: usize| m.figures.drawn[j];
+        let first_cash = months
+            .iter()
+            .position(|m| drawn(m, 0) > Decimal::ZERO)
+            .expect("the free account is reached within five years");
+        assert!(first_cash > 0);
+        assert!(
+            months[..first_cash].iter().all(|m| drawn(m, 1) > Decimal::ZERO && drawn(m, 2).is_zero()),
+            "until the free account is reached, only the gains account is drawn"
+        );
+        assert!(
+            months[first_cash + 1..].iter().all(|m| drawn(m, 1).is_zero()),
+            "the gains account is empty once the next kind has been reached"
+        );
+    }
+
+    #[test]
+    fn the_periodic_charge_lands_in_the_months_it_is_levied() {
+        // Periods are counted outwards from the handover at month 24, so the
+        // drawdown's charges fall at its months 1 (closing the period that ends
+        // at the handover), 13 and 25 — and nowhere else.
+        let s = schedule(&strategy_run(
+            vec![account("Fund", FUND, "300000", "0", "0")],
+            "24",
+            "36",
+            "1000",
+            Strategy::pro_rata(),
+            Some(levy_ctx(vec![])),
+        ))
+        .unwrap();
+        let months = months(&s);
+        for m in &months {
+            let levied = [1, 13, 25].contains(&m.drawdown_month);
+            assert_eq!(!m.figures.charged.is_zero(), levied, "month {}", m.drawdown_month);
+        }
+        // 2% of the 299,000 that opened the period, less the 1,000 allowance,
+        // at 20%.
+        assert_eq!(months[0].figures.charged, d("996.00"));
+        // Rounded per month, the drawdown's charges sum to the projection's own
+        // drawdown charge to within a penny per charged month.
+        let in_drawdown = s.output.charged_total - s.output.charged_series[24];
+        let summed: Decimal = months.iter().map(|m| m.figures.charged).sum();
+        assert!((summed - in_drawdown).abs() <= d("0.03"), "{summed} vs {in_drawdown}");
+    }
+
+    #[test]
+    fn a_deposits_plan_has_nothing_to_schedule() {
+        let s = schedule(&one("10000", "7", "10", Unit::Years)).unwrap();
+        assert!(s.years.is_empty());
+        assert_eq!(s.runs_out, None);
+        assert_eq!(s.withdrawal, Decimal::ZERO);
+        assert_eq!(s.output, calculate(&one("10000", "7", "10", Unit::Years)).unwrap());
+    }
+
+    #[test]
+    fn an_invalid_input_errors_exactly_as_calculate_does() {
+        let mut input = sixty_forty("24");
+        input.investments[0].value = "lots".into();
+        assert_eq!(schedule(&input).unwrap_err(), calculate(&input).unwrap_err());
     }
 }

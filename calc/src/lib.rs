@@ -19,9 +19,15 @@
 //! is the pot at the start of drawdown ([`CalcOutput::handover_total`]) — so the
 //! UI never has to stitch two projections together or work out the handover value
 //! for itself.
+//!
+//! [`schedule`] reads the same projection back month by month: what each
+//! drawdown month takes from each holding, rounded so that every month and every
+//! year adds up on screen. It runs exactly the projection [`calculate`] does, so
+//! the two never disagree.
 
 mod engine;
 mod parse;
+mod schedule;
 mod solve;
 mod strategy;
 mod tax;
@@ -32,11 +38,12 @@ mod tests;
 
 pub use engine::calculate;
 pub use parse::parse_number;
+pub use schedule::schedule;
 pub use solve::{solve, Goal, Solution};
 pub use strategy::{Limit, Order, Strategy};
 pub use types::{
     CalcError, CalcInput, CalcOutput, Field, InvestmentField, InvestmentInput, InvestmentResult,
-    Plan, TaxContext, Unit,
+    Plan, RunsOut, Schedule, ScheduleFigures, ScheduleMonth, ScheduleYear, TaxContext, Unit,
 };
 
 /// The 100-year projection cap, in months. `calculate` rejects any period past

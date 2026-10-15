@@ -14,6 +14,8 @@
 //!   [`panel`]'s shared last-good/`.stale` shell.
 //! - [`strategy`] — the side-by-side comparison of withdrawal orders, which
 //!   reports several axes and deliberately ranks none of them.
+//! - [`schedule`] — the collapsible month-by-month panel: how one of those
+//!   strategies would take the money out, holding by holding, year by year.
 //! - [`freshness`] — whether the tax figures are still current. Reads the clock
 //!   here, at the edge, so `calc` stays a pure function of the form.
 //! - [`format`] / [`chart`] — `Decimal`→string formatting and the SVG chart.
@@ -35,6 +37,7 @@ pub mod model;
 pub mod outcome;
 pub mod panel;
 pub mod results;
+pub mod schedule;
 pub mod share;
 pub mod strategy;
 pub mod summary;

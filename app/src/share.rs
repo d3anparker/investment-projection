@@ -73,6 +73,15 @@ pub struct ShareState {
     /// working; hence no `VERSION` bump.
     #[serde(default)]
     pub jurisdiction: String,
+    /// Whether the month-by-month panel is open. A view setting rather than a
+    /// projection input, carried so a shared link opens on what its sender was
+    /// looking at. `#[serde(default)]`: an older link opens with it closed.
+    #[serde(default)]
+    pub schedule_open: bool,
+    /// Which withdrawal strategy the month-by-month panel shows, as a
+    /// `StrategyChoice` id. Blank follows the "Take it" picker.
+    #[serde(default)]
+    pub schedule_strategy: String,
 }
 
 fn default_horizon_value() -> String {
@@ -146,6 +155,8 @@ impl ShareState {
             uprate: String::new(),
             options: std::collections::BTreeMap::new(),
             jurisdiction: String::new(),
+            schedule_open: false,
+            schedule_strategy: String::new(),
         }
     }
 }
@@ -253,6 +264,8 @@ mod tests {
             uprate: "2".into(),
             options: [("joint".to_string(), "true".to_string())].into_iter().collect(),
             jurisdiction: "de".into(),
+            schedule_open: true,
+            schedule_strategy: "preserve".into(),
         }
     }
 
@@ -312,6 +325,8 @@ mod tests {
         assert_eq!(s.withdrawal, "");
         assert_eq!(s.goal_target, "");
         assert_eq!(s.goal_kind, "topup");
+        assert!(!s.schedule_open, "a link from before the panel existed opens it closed");
+        assert_eq!(s.schedule_strategy, "");
         assert_eq!(s.rows.len(), 1);
         assert_eq!(s.rows[0].name, "A");
     }

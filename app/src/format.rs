@@ -48,6 +48,20 @@ pub fn fmt_money(d: Decimal) -> String {
     format!("{}{}{}.{}", if neg { "-" } else { "" }, currency(), group_thousands(int), frac)
 }
 
+/// The em-dash an absent figure reads as, in every table.
+pub const DASH: &str = "\u{2014}";
+
+/// A money cell that may have nothing in it: the figure, or [`DASH`] where it
+/// is zero, so a holding that moved nothing reads as absent rather than as a
+/// column of £0.00s.
+pub fn money_or_dash(d: Decimal) -> String {
+    if d.is_zero() {
+        DASH.to_string()
+    } else {
+        fmt_money(d)
+    }
+}
+
 /// Format a monetary amount with an explicit sign: `+£1,234.56` / `-£1,234.56`.
 ///
 /// Used for gain/loss figures, where the direction must survive greyscale
@@ -148,6 +162,13 @@ mod tests {
         assert_eq!(fmt_money(d("-89.9")), "-\u{00a3}89.90");
         // A whole number still shows two decimal places.
         assert_eq!(fmt_money(d("200")), "\u{00a3}200.00");
+    }
+
+    #[test]
+    fn a_zero_money_cell_reads_as_absent() {
+        assert_eq!(money_or_dash(d("0")), DASH);
+        assert_eq!(money_or_dash(d("0.00")), DASH);
+        assert_eq!(money_or_dash(d("12.5")), "\u{00a3}12.50");
     }
 
     #[test]

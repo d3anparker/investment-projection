@@ -147,7 +147,7 @@ fn solve_top_up(input: &CalcInput, target: &str) -> Result<Solution, CalcError> 
         // so a top-up goal must feel that drag too; a withdrawal-only system opens
         // no session here and the run is untaxed exactly as before.
         let mut plan = open_if_ordered(&input.tax, &Strategy::pro_rata(), false)?;
-        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::pro_rata(), &[], None, &mut plan)?;
+        let run = project(&prepared, horizon_months, 0, Decimal::ZERO, &Strategy::pro_rata(), &[], None, &mut plan, false)?;
         Ok(round2(*run.totals.last().expect("the deposits probe runs over the 100-year cap, so the series has an end")))
     };
 
@@ -233,7 +233,7 @@ fn solve_max_withdrawal(input: &CalcInput) -> Result<Solution, CalcError> {
     // rounding and per-row assembly a full `CalcOutput` would carry.
     let run_with = |w: Decimal| -> Result<Run, CalcError> {
         let mut plan = open_if_ordered(&input.tax, strategy, true)?;
-        project(&prepared, horizon_months, drawdown_months, w, strategy, &groups, rate_cap, &mut plan)
+        project(&prepared, horizon_months, drawdown_months, w, strategy, &groups, rate_cap, &mut plan, false)
     };
     // A draw is feasible if it survives the whole drawdown period without the
     // portfolio ever hitting £0.
@@ -340,7 +340,7 @@ fn solve_time_to_deplete(input: &CalcInput) -> Result<Solution, CalcError> {
     let prepared = prepare_for(input)?;
     let groups = groups_for(strategy, &prepared);
     let mut plan = open_if_ordered(&input.tax, strategy, true)?;
-    let out = project(&prepared, horizon_months, span, withdrawal, strategy, &groups, rate_cap, &mut plan)?;
+    let out = project(&prepared, horizon_months, span, withdrawal, strategy, &groups, rate_cap, &mut plan, false)?;
 
     Ok(match out.depletion_month {
         Some(m) => Solution::Depletes(m - horizon_months),

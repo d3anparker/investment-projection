@@ -2,7 +2,7 @@
 //! scrubber) and the per-holding table.
 
 use crate::chart::{chart_svg, Layout};
-use crate::format::{fmt_money, fmt_pct, horizon_label, month_label};
+use crate::format::{fmt_money, fmt_pct, horizon_label, money_or_dash, month_label};
 use crate::panel::stale_body;
 use calc::CalcOutput;
 use leptos::*;
@@ -261,26 +261,14 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             // Column order mirrors the arithmetic: what you hold plus what you
             // add, grown at this rate, reaches the handover pot, from which the
             // drawdown is taken to land on the projection.
-            let contributed = has_contributions.then(|| {
-                let cell = if r.contributed.is_zero() {
-                    "\u{2014}".to_string()
-                } else {
-                    fmt_money(r.contributed)
-                };
-                view! { <td class="num">{cell}</td> }
-            });
+            let contributed = has_contributions
+                .then(|| view! { <td class="num">{money_or_dash(r.contributed)}</td> });
             let handover_cell = has_handover.then(|| {
                 let cell = r.handover_value.map_or("\u{2014}".to_string(), fmt_money);
                 view! { <td class="num">{cell}</td> }
             });
-            let withdrawn = has_withdrawals.then(|| {
-                let cell = if r.withdrawn.is_zero() {
-                    "\u{2014}".to_string()
-                } else {
-                    fmt_money(r.withdrawn)
-                };
-                view! { <td class="num">{cell}</td> }
-            });
+            let withdrawn = has_withdrawals
+                .then(|| view! { <td class="num">{money_or_dash(r.withdrawn)}</td> });
             // Tax and what was kept sit next to the gross figure they split, so
             // the three read across as one sum rather than as three statistics.
             // A row that took nothing out has no split to show, so both cells
@@ -294,14 +282,8 @@ fn results_view(out: &CalcOutput) -> impl IntoView {
             };
             let tax_cell = has_tax.then(|| view! { <td class="num">{split(r.tax_paid)}</td> });
             let net_cell = has_tax.then(|| view! { <td class="num">{split(r.net_withdrawn)}</td> });
-            let charged_cell = has_charge.then(|| {
-                let cell = if r.charged.is_zero() {
-                    "\u{2014}".to_string()
-                } else {
-                    fmt_money(r.charged)
-                };
-                view! { <td class="num">{cell}</td> }
-            });
+            let charged_cell =
+                has_charge.then(|| view! { <td class="num">{money_or_dash(r.charged)}</td> });
             let account_cell =
                 has_accounts.then(|| view! { <td>{account_label(&r.account_kind)}</td> });
             view! {

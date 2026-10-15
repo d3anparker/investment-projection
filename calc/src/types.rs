@@ -401,3 +401,87 @@ pub struct CalcOutput {
     pub rules_label: Option<&'static str>,
     pub rules_as_of: Option<SimpleDate>,
 }
+
+/// A drawdown, month by month: what each month takes out of each holding.
+///
+/// Built by [`crate::schedule`], which runs the very projection [`crate::calculate`]
+/// does and keeps it as `output`, so the months and the totals cannot disagree
+/// about which projection they describe. Empty `years` for a deposits plan,
+/// which draws nothing down.
+///
+/// Every figure is rounded to the penny and adds up *within* the schedule: a
+/// month's holdings sum exactly to its `gross`, and a year is exactly the sum of
+/// its months. The rounding is done per month, so a holding's figures summed
+/// over the *whole* drawdown can differ by a few pence from that holding's
+/// [`InvestmentResult::withdrawn`], which is rounded once from the raw total.
+/// That is the trade the schedule makes deliberately: the month a reader acts
+/// on adds up to what they asked for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Schedule {
+    /// The projection the schedule was read from — identical to what
+    /// [`crate::calculate`] returns for the same input.
+    pub output: CalcOutput,
+    /// The monthly withdrawal the projection was asked for, as `calc` parsed
+    /// it: gross under pro-rata, net under every other order. Zero for a blank
+    /// box or a deposits plan.
+    pub withdrawal: Decimal,
+    /// The drawdown in years of twelve months, Year 1 first. The last year is
+    /// shorter when the drawdown is not a whole number of years.
+    pub years: Vec<ScheduleYear>,
+    /// When the last of the portfolio is taken; `None` if it lasts.
+    pub runs_out: Option<RunsOut>,
+}
+
+/// The point in a drawdown at which the portfolio empties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunsOut {
+    /// The **drawdown** month, counted from 1, in which the last of the
+    /// portfolio is taken. Not [`CalcOutput::depletion_month`], which is an
+    /// absolute index into `series` — the two differ by `horizon_months`, and
+    /// converting between them is done in `calc` so no caller has to.
+    pub month: u32,
+    /// The schedule year that month falls in, counted from 1.
+    pub year: u32,
+}
+
+/// One year of a [`Schedule`]: its months, and their sums.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScheduleYear {
+    /// Counted from 1.
+    pub year: u32,
+    pub months: Vec<ScheduleMonth>,
+    /// The months' figures summed, and the portfolio at the end of the last.
+    pub figures: ScheduleFigures,
+}
+
+/// One month of a [`Schedule`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScheduleMonth {
+    /// Counted from 1 at the first withdrawal — a month of *drawdown*, not an
+    /// index into [`CalcOutput::series`].
+    pub drawdown_month: u32,
+    pub figures: ScheduleFigures,
+}
+
+/// What one period of a [`Schedule`] — a month, or a year of them — moved.
+/// One type for both, so a year is the sum of its months by construction and
+/// a reader renders the two through one function.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScheduleFigures {
+    /// Taken from each holding, before tax, parallel to
+    /// [`CalcOutput::investments`]. Sums exactly to `gross`.
+    pub drawn: Vec<Decimal>,
+    /// Taken out, before tax.
+    pub gross: Decimal,
+    /// Tax on those withdrawals: `gross - net`, so the three always reconcile
+    /// on screen.
+    pub tax: Decimal,
+    /// What reached the holder.
+    pub net: Decimal,
+    /// The periodic holding charge levied in the period. Zero unless the tax
+    /// system charges for holding. After a growth phase, the first drawdown
+    /// month carries the charge for the period that closes at the handover.
+    pub charged: Decimal,
+    /// The portfolio at the end of the period.
+    pub value_after: Decimal,
+}

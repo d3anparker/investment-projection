@@ -154,6 +154,12 @@ body {
     grid-column: 1 / -1;
   }
 
+  /* The month-by-month panel below it, for the same reason: a column per
+     holding plus the totals is the widest table on the page. */
+  .panel-schedule {
+    grid-column: 1 / -1;
+  }
+
   /* The mode switch is full-width above every panel, so it reads as switching
      the whole context rather than one column. */
   .mode-switch {
@@ -904,7 +910,8 @@ input[type="number"]::-webkit-inner-spin-button {
   text-align: center;
 }
 
-.breakdown td {
+.breakdown td,
+.schedule tbody th[scope="row"] {
   padding: 8px 6px;
   font-size: 0.92rem;
   border-top: 1px solid var(--line);
@@ -964,7 +971,8 @@ input[type="number"]::-webkit-inner-spin-button {
   width: 96px;
 }
 
-.tax-settings select {
+.tax-settings select,
+.schedule-pick select {
   width: auto;
   max-width: 100%;
 }
@@ -998,6 +1006,143 @@ input[type="number"]::-webkit-inner-spin-button {
   text-align: left;
   font-weight: 600;
   max-width: 22ch;
+}
+
+/* Each comparison row's way into the month-by-month panel. Compact, so the
+   column stays narrow; no top margin, since it sits in a table cell. */
+.month-link {
+  margin-top: 0;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+/* the month-by-month panel */
+/* Its heading *is* the disclosure button, so the panel reads as one titled card
+   whether it is open or shut. */
+.panel .disclosure-h {
+  margin: 0;
+}
+
+.disclosure,
+.year-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.disclosure:focus-visible,
+.year-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* A chevron drawn with borders, so it needs no glyph from the font. It points
+   right while shut and down while open, following `aria-expanded` itself, so
+   the picture cannot disagree with what a screen reader is told. */
+.disclosure-mark {
+  flex: none;
+  width: 0.45em;
+  height: 0.45em;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+
+[aria-expanded="true"] > .disclosure-mark {
+  transform: rotate(45deg);
+}
+
+.schedule-body {
+  margin-top: 16px;
+}
+
+.schedule-pick {
+  margin-bottom: 14px;
+}
+
+.schedule-strategy,
+.schedule-sentence,
+.schedule-problem {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.schedule-strategy strong {
+  color: var(--text);
+}
+
+.schedule-body .depletion-note {
+  margin: 12px 0;
+}
+
+.schedule-body .table-scroll {
+  margin-top: 14px;
+}
+
+/* A holding's account and return, under its name. Sentence case: the heading
+   style's capitals would shout an account name. */
+.breakdown .col-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* Row headings read as labels, not as more column headings. They take the
+   cells' padding, rule and size from the `.breakdown td` rule. */
+.schedule tbody th[scope="row"] {
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  text-align: left;
+  white-space: nowrap;
+}
+
+/* The starting values are a balance, not a withdrawal: set apart so the row
+   is not read as the first month. The closing "nothing left" row likewise
+   reads as a note, not a figure. */
+.schedule .schedule-start th[scope="row"],
+.schedule .schedule-start td,
+.schedule-end td {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* A year's months, indented under it on the raised surface. */
+.schedule-months tr {
+  background: var(--panel-2);
+}
+
+.schedule .schedule-months th[scope="row"] {
+  padding-left: 30px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* The year button's pointer target reaches the full row height without
+   changing how the row is drawn: the row's own 8px padding above and below,
+   and no further, so neighbouring years' targets never overlap. */
+.year-toggle {
+  position: relative;
+}
+
+.year-toggle::after {
+  content: "";
+  position: absolute;
+  inset: -8px -6px;
 }
 
 /* which rules the tax figures came from, and when they were checked */

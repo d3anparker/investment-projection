@@ -63,6 +63,32 @@ pub fn stale_note(system: &dyn TaxSystem, today: SimpleDate) -> Option<String> {
     }
 }
 
+/// Which rules produced a projection's tax figures and when they were checked,
+/// plus the stale warning when one applies — or nothing, for a projection that
+/// used no rules. Always shown alongside the figures, never as a tooltip: a tax
+/// figure without a date is a figure you cannot judge. One spelling for every
+/// panel that shows tax figures, so the rule cannot hold in one and not another.
+pub fn rules_note(
+    system: &dyn TaxSystem,
+    out: &calc::CalcOutput,
+    today: SimpleDate,
+) -> Option<leptos::View> {
+    use leptos::*;
+    let (label, checked) = (out.rules_label?, out.rules_as_of?);
+    let line = as_of_line(system, label, checked);
+    let stale = stale_note(system, today);
+    Some(
+        view! {
+            <p class="tax-asof">{line}</p>
+            // `role="note"`, never `role="alert"`: this is standing context,
+            // not something that just happened, and an alert here would
+            // interrupt a screen reader on every recomputation.
+            {stale.map(|msg| view! { <p class="tax-stale" role="note">{msg}</p> })}
+        }
+        .into_view(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

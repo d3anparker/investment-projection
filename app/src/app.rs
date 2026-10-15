@@ -14,7 +14,7 @@ use crate::outcome::{invalid_attrs, Outcome, ANNOUNCE_DELAY, ERROR_ID};
 use crate::results::ResultsPanel;
 use crate::share::ShareState;
 use crate::summary::SummaryPanel;
-use crate::{convert, format, freshness, model, share, strategy};
+use crate::{convert, format, freshness, model, schedule, share, strategy};
 use leptos::leptos_dom::helpers::TimeoutHandle;
 use leptos::*;
 use std::time::Duration;
@@ -231,6 +231,15 @@ pub fn App() -> impl IntoView {
     let goal_target = create_rw_signal(state.goal_target);
     let goal_kind = create_rw_signal(state.goal_kind);
 
+    // The month-by-month panel: whether it is open, and which strategy it shows
+    // (blank follows the "Take it" picker). View state rather than projection
+    // input, so — like the goal — neither is in `FormInput`, and opening the
+    // panel never re-runs `calculate`. The toggle's ref lives here so a
+    // comparison row can move focus to it.
+    let schedule_open = create_rw_signal(state.schedule_open);
+    let schedule_strategy = create_rw_signal(state.schedule_strategy);
+    let schedule_toggle = create_node_ref::<html::Button>();
+
     // Single source of computed truth. Reading every field's signal here means
     // the projection recomputes whenever any input changes; the memo caches the
     // result so `calculate` runs once even though several readers want it (the
@@ -304,6 +313,57 @@ pub fn App() -> impl IntoView {
         set_timeout_with_handle(move || comparison_input.set(comparison_of(&f)), ANNOUNCE_DELAY).ok()
     });
     let comparison = create_memo(move |_| comparison_input.with(strategy::compare));
+    // Flips only when there starts or stops being anything to compare, so the
+    // two panels gated on it are not rebuilt on every recomputation — which
+    // would close the years a reader opened in the schedule. (The comparison's
+    // own table, row buttons included, still rebuilds when its rows change:
+    // `StrategyPanel` re-renders it from `rows`.)
+    let comparing = create_memo(move |_| comparison.with(|c| !c.is_empty()));
+
+    // Which strategy the month-by-month panel shows, resolved once: the one it
+    // was pointed at, or the picker's. Both the panel's select and its
+    // projection read this, so the "blank follows the picker" rule has a single
+    // home.
+    let schedule_choice =
+        create_memo(move |_| schedule::chosen(&schedule_strategy.get(), &strategy.get()));
+    // The month-by-month panel's projection: a separate memo for the
+    // comparison's reasons, and off the same debounced input, since it is one
+    // more full projection on the typing path. `None` while the panel is
+    // closed, so a closed panel costs nothing at all. The rate cap is read
+    // untracked: it is part of the debounced input, whose refresh re-runs this
+    // once typing settles — tracked, every keystroke in the cap box would run a
+    // whole projection straight away.
+    let schedule_shown = create_memo(move |_| {
+        if !schedule_open.get() {
+            return None;
+        }
+        let chosen = schedule_choice.get().build(&rate_cap.get_untracked());
+        Some(comparison_input.with(|input| schedule::show(input, chosen)))
+    });
+    // Whether anything on the page is projecting the rate-capped strategy: the
+    // picker, or the open month-by-month panel. The cap box appears exactly
+    // then — a panel showing that strategy under another picker would
+    // otherwise use a cap the reader can neither see nor change. A memo, so
+    // the box is rebuilt only when this flips.
+    let uses_cap = create_memo(move |_| {
+        let capped = convert::StrategyChoice::Capped;
+        convert::StrategyChoice::from_id(&strategy.get()) == capped
+            || (schedule_open.get() && schedule_choice.get() == capped)
+    });
+    // A comparison row's "Month by month": point the panel at that row's
+    // strategy, open it, and take focus there — which also scrolls it into view.
+    // Batched, so the panel projects once rather than once per signal. The
+    // toggle already exists (the panel renders whenever the comparison does),
+    // so focus can move at once.
+    let show_months = Callback::new(move |id: &'static str| {
+        batch(|| {
+            schedule_strategy.set(id.to_string());
+            schedule_open.set(true);
+        });
+        if let Some(button) = schedule_toggle.get_untracked() {
+            let _ = button.focus();
+        }
+    });
 
     // Read once at mount, not in a memo: the clock is not reactive, and letting
     // a date into the projection would make the same shared link produce
@@ -434,6 +494,8 @@ pub fn App() -> impl IntoView {
             uprate: uprate.get(),
             options: options.get(),
             jurisdiction: jurisdiction.get(),
+            schedule_open: schedule_open.get(),
+            schedule_strategy: schedule_strategy.get(),
         };
         // Write the fragment with replace_state so the shared link doesn't pile
         // up Back-button history entries. The status is set inside (address-bar
@@ -833,19 +895,13 @@ pub fn App() -> impl IntoView {
                                     // markup. `from_id` maps blank/unknown to
                                     // pro-rata, which is why that option lights up
                                     // by default.
-                                    {convert::StrategyChoice::ALL.into_iter().map(|choice| {
-                                        let id = choice.id();
-                                        view! {
-                                            <option value=id
-                                                selected=move || convert::StrategyChoice::from_id(&strategy.get()) == choice>
-                                                {format!("\u{2014} {}", choice.picker_label())}
-                                            </option>
-                                        }
-                                    }).collect_view()}
+                                    {strategy::strategy_options(move |choice| {
+                                        convert::StrategyChoice::from_id(&strategy.get()) == choice
+                                    })}
                                 </select>
                             </div>
 
-                            {move || (convert::StrategyChoice::from_id(&strategy.get()) == convert::StrategyChoice::Capped).then(|| {
+                            {move || uses_cap.get().then(|| {
                                 adorned_field("rate-cap", "never paying more than", "pct", "20",
                                     "at the margin", cap_ref, rate_cap, strategy_bad)
                             })}
@@ -970,34 +1026,21 @@ pub fn App() -> impl IntoView {
                 // a question the reader only asks once they believe the figures
                 // above, and its seven-column table wants the whole page width.
                 // Gated on there being something to compare, so it is absent —
-                // not an empty card — outside drawdown mode.
-                {move || (!comparison.get().is_empty()).then(|| view! {
+                // not an empty card — outside drawdown mode. On `comparing`, not
+                // on `comparison`: everything inside reads its own signals, so
+                // the section is built once rather than on every recomputation.
+                {move || comparing.get().then(|| view! {
                     <section class="panel panel-strategy" aria-labelledby="strategy-h">
                         <h2 id="strategy-h">"Ways to draw it down"</h2>
-                        <strategy::StrategyPanel rows=comparison/>
+                        <strategy::StrategyPanel rows=comparison on_show=show_months/>
 
                         // Which rules produced the tax figures, and when they were
-                        // checked. Always shown alongside them, never as a tooltip:
-                        // a tax figure without a date is a figure you cannot judge.
+                        // checked. The system is the reactive derivation, not the
+                        // ambient one: this closure would otherwise be correct
+                        // only because it happens to read `outcome` first.
                         {move || outcome.with(|o| {
                             o.result.as_ref().ok().and_then(|out| {
-                                let (label, checked) = (out.rules_label?, out.rules_as_of?);
-                                // The reactive derivation, not the ambient one:
-                                // this closure would otherwise be correct only
-                                // because it happens to read `outcome` first.
-                                let system = active_sys();
-                                let line = freshness::as_of_line(system, label, checked);
-                                let stale = freshness::stale_note(system, today.get_value());
-                                Some(view! {
-                                    <p class="tax-asof">{line}</p>
-                                    // `role="note"`, never `role="alert"`: this is
-                                    // standing context, not something that just
-                                    // happened, and an alert here would interrupt a
-                                    // screen reader on every recomputation.
-                                    {stale.map(|msg| view! {
-                                        <p class="tax-stale" role="note">{msg}</p>
-                                    })}
-                                })
+                                freshness::rules_note(active_sys(), out, today.get_value())
                             })
                         })}
                         // The active jurisdiction's own figure notes, if any.
@@ -1005,6 +1048,22 @@ pub fn App() -> impl IntoView {
                             .notes_panel
                             .map(|panel| panel(crate::jurisdiction::NotesSlot))}
                     </section>
+                })}
+
+                // How one of those ways would take the money out, month by
+                // month. Its own collapsible panel below the comparison it is
+                // opened from; collapsed by default, and computing nothing while
+                // it is. Gated on the comparison existing, so the two appear and
+                // go together.
+                {move || comparing.get().then(|| view! {
+                    <schedule::SchedulePanel
+                        open=schedule_open
+                        chosen_id=schedule_strategy
+                        choice=schedule_choice
+                        shown=schedule_shown
+                        jurisdiction=jurisdiction
+                        today=today.get_value()
+                        toggle=schedule_toggle/>
                 })}
             </main>
 

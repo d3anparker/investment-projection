@@ -926,6 +926,8 @@ fn state_of(rows: Vec<RowData>, horizon_value: &str, horizon_unit: &str) -> Shar
         uprate: String::new(),
         options: std::collections::BTreeMap::new(),
         jurisdiction: String::new(),
+        schedule_open: false,
+        schedule_strategy: String::new(),
     }
 }
 
@@ -1425,6 +1427,218 @@ async fn the_german_year_control_asks_a_past_question_when_already_drawing() {
     harness::settle().await;
     assert!(harness::any_text(&planning, ".system-options .fld-lbl", "Year drawing starts"));
     assert!(harness::q_opt(&planning, ".system-options-prompt").is_none());
+}
+
+// =====================================================================
+// The month-by-month panel
+// =====================================================================
+
+/// £6,000 and £4,000 at 0%, already drawing £1,000 a month over two years: an
+/// exact 60/40 split every month, and nothing left after month 10.
+fn sixty_forty_state() -> ShareState {
+    let mut s = already_drawing_state(vec![row("Alpha", "6000", "0", "0"), row("Beta", "4000", "0", "0")]);
+    s.drawdown_value = "2".into();
+    s.withdrawal = "1000".into();
+    s.schedule_open = true;
+    s
+}
+
+/// The year button reading `label`, e.g. "Year 2".
+fn year_toggle(root: &web_sys::Element, label: &str) -> web_sys::Element {
+    harness::qa(root, ".year-toggle")
+        .into_iter()
+        .find(|b| harness::text_of(b).starts_with(label))
+        .unwrap_or_else(|| panic!("no year toggle reading {label}"))
+}
+
+#[wasm_bindgen_test]
+async fn the_month_by_month_panel_starts_shut_and_draws_nothing_up() {
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    let toggle = harness::q(&root, ".panel-schedule .disclosure");
+    assert_eq!(toggle.get_attribute("aria-expanded").as_deref(), Some("false"));
+    assert_eq!(toggle.get_attribute("aria-controls").as_deref(), Some("schedule-body"));
+    assert!(harness::q(&root, "#schedule-body").has_attribute("hidden"));
+    assert!(harness::q_opt(&root, ".schedule").is_none(), "nothing is drawn up while it is shut");
+
+    // It belongs to the comparison, so it is absent wherever that is.
+    let deposits = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    assert!(harness::q_opt(&deposits, ".panel-schedule").is_none());
+}
+
+#[wasm_bindgen_test]
+async fn a_comparison_row_opens_the_panel_on_its_own_strategy() {
+    // Picked: pro-rata. The row's button points the panel elsewhere without
+    // touching the picker, and takes focus to the panel it opened.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], ""));
+    let buttons = harness::qa(&root, ".strategy-compare .month-link");
+    assert_eq!(buttons.len(), app::strategy::candidates().len(), "every row has one");
+    let row_button = buttons
+        .iter()
+        .find(|b| b.get_attribute("aria-label").unwrap_or_default().contains("Longest-lasting pot"))
+        .expect("the order-by-return row has a button");
+    let name = row_button.get_attribute("aria-label").unwrap();
+    assert!(
+        name.starts_with(&harness::text_of(row_button)),
+        "the accessible name extends the visible text: {name}"
+    );
+
+    harness::click(row_button);
+    harness::settle().await;
+
+    let toggle = harness::q(&root, ".panel-schedule .disclosure");
+    assert_eq!(toggle.get_attribute("aria-expanded").as_deref(), Some("true"));
+    assert!(harness::active_element() == Some(toggle), "focus moves to the panel it opened");
+    let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
+    assert_eq!(shown.value(), "preserve");
+    let picked: web_sys::HtmlSelectElement = harness::q(&root, "#strategy").dyn_into().unwrap();
+    assert_eq!(picked.value(), "pro-rata", "the picker is left alone");
+    assert!(harness::any_text(&root, ".schedule-strategy", "Longest-lasting pot"));
+}
+
+#[wasm_bindgen_test]
+async fn the_panel_reads_a_sixty_forty_split_to_the_penny() {
+    let root = harness::mount_with(&sixty_forty_state());
+
+    let start = harness::text(&root, ".schedule-start");
+    assert!(start.contains("Value today"), "no growth phase, so the drawdown starts from today");
+    for figure in [money(6000, 0), money(4000, 0), money(10000, 0)] {
+        assert!(start.contains(&figure), "{figure} in the starting row: {start}");
+    }
+
+    // Year 1 opens by default.
+    let months = harness::qa(&root, "#schedule-y1 tr");
+    assert_eq!(months.len(), 12);
+    let first = harness::text_of(&months[0]);
+    assert!(first.starts_with("Month 1"));
+    for figure in [money(600, 0), money(400, 0), money(1000, 0), money(9000, 0)] {
+        assert!(first.contains(&figure), "{figure} in month 1: {first}");
+    }
+    // Months 11 and 12 take nothing: every cell but the balance is a dash.
+    for m in &months[10..] {
+        let cells = harness::qa(m, "td");
+        let (balance, taken) = cells.split_last().unwrap();
+        assert!(taken.iter().all(|c| harness::text_of(c) == "\u{2014}"));
+        assert_eq!(harness::text_of(balance), money(0, 0));
+    }
+
+    assert!(harness::any_text(&root, ".schedule-body .depletion-note", "Month 10 (Year 1)"));
+    assert!(harness::any_text(&root, ".schedule-end", "Nothing left to take after Year 1"));
+    assert!(harness::q_opt(&root, "#schedule-y2").is_none(), "no empty year is listed");
+    assert!(harness::q_opt(&root, ".error-msg").is_none());
+}
+
+#[wasm_bindgen_test]
+async fn opening_a_year_shows_its_months_and_keeps_the_button() {
+    let mut s = sixty_forty_state();
+    s.rows = vec![row("Fund", "300000", "5", "0")];
+    s.drawdown_value = "3".into();
+    let root = harness::mount_with(&s);
+    assert_eq!(harness::qa(&root, "#schedule-y1 tr").len(), 12, "Year 1 starts open");
+
+    let year2 = year_toggle(&root, "Year 2");
+    assert_eq!(year2.get_attribute("aria-expanded").as_deref(), Some("false"));
+    assert_eq!(year2.get_attribute("aria-controls").as_deref(), Some("schedule-y2"));
+    assert!(harness::qa(&root, "#schedule-y2 tr").is_empty());
+
+    harness::click(&year2);
+    harness::settle().await;
+    let months = harness::qa(&root, "#schedule-y2 tr");
+    assert_eq!(months.len(), 12);
+    assert!(harness::text_of(&months[0]).starts_with("Month 13"));
+    assert!(harness::text_of(&months[11]).starts_with("Month 24"));
+    let after = year_toggle(&root, "Year 2");
+    assert!(after == year2, "opening a year must not rebuild its button");
+    assert_eq!(after.get_attribute("aria-expanded").as_deref(), Some("true"));
+
+    harness::click(&after);
+    harness::settle().await;
+    assert!(harness::qa(&root, "#schedule-y2 tr").is_empty());
+    assert_eq!(harness::qa(&root, "#schedule-y1 tr").len(), 12, "other years are untouched");
+}
+
+#[wasm_bindgen_test]
+async fn an_ordered_strategy_leaves_the_last_account_untouched_at_first() {
+    // The first and last kinds of the seeded system's conventional order, so
+    // the test names no jurisdiction's wrappers.
+    let order = seeded_system().conventional_order();
+    let (first, last) = (order[0], order[order.len() - 1]);
+    assert_ne!(first, last);
+    let mut a = row("First", "300000", "0", "0");
+    a.account_kind = first.into();
+    let mut b = row("Last", "300000", "0", "0");
+    b.account_kind = last.into();
+    let mut s = taxed_state(vec![a, b], "cheapest");
+    s.schedule_open = true;
+    s.schedule_strategy = "conventional".into();
+    let root = harness::mount_with(&s);
+
+    let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
+    assert_eq!(shown.value(), "conventional", "the panel's strategy outranks the picker");
+    for m in harness::qa(&root, "#schedule-y1 tr") {
+        let cells = harness::qa(&m, "td");
+        assert_ne!(harness::text_of(&cells[0]), "\u{2014}", "the first account carries the drawdown");
+        assert_eq!(harness::text_of(&cells[1]), "\u{2014}", "the last is not touched yet");
+    }
+    assert!(harness::any_text(&root, ".schedule thead th", "Tax"), "an ordered strategy is priced");
+}
+
+#[wasm_bindgen_test]
+async fn the_panel_follows_an_edit_once_typing_settles() {
+    let root = harness::mount_with(&sixty_forty_state());
+    harness::settle().await;
+    let withdrawal = harness::input_by_id(&root, "withdrawal");
+    harness::type_into(&withdrawal, "500").await;
+    // Debounced like the comparison it reads from.
+    harness::sleep(900).await;
+    let first = harness::text_of(&harness::qa(&root, "#schedule-y1 tr")[0]);
+    for figure in [money(300, 0), money(200, 0), money(500, 0)] {
+        assert!(first.contains(&figure), "{figure} in month 1: {first}");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn a_shared_link_reopens_the_panel_where_it_was() {
+    let mut s = sixty_forty_state();
+    s.schedule_strategy = "preserve".into();
+    let root = harness::mount_with(&s);
+    let toggle = harness::q(&root, ".panel-schedule .disclosure");
+    assert_eq!(toggle.get_attribute("aria-expanded").as_deref(), Some("true"));
+    let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
+    assert_eq!(shown.value(), "preserve");
+
+    // And "Copy link" carries both back out.
+    harness::click(&harness::find_button(&root, "Copy link"));
+    harness::settle().await;
+    let hash = web_sys::window().unwrap().location().hash().unwrap();
+    let back = share::decode(&hash).expect("the link decodes");
+    assert!(back.schedule_open);
+    assert_eq!(back.schedule_strategy, "preserve");
+}
+
+#[wasm_bindgen_test]
+async fn a_panel_showing_the_capped_strategy_puts_its_cap_on_screen() {
+    // The picker is not capped, but the panel is: it projects with the rate
+    // cap, so the cap box must be there to see and change.
+    let mut s = taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest");
+    s.schedule_strategy = "capped".into();
+    s.rate_cap = "20".into();
+    let shut = harness::mount_with(&s);
+    assert!(harness::q_opt(&shut, "#rate-cap").is_none(), "a shut panel uses nothing");
+
+    s.schedule_open = true;
+    let open = harness::mount_with(&s);
+    harness::settle().await;
+    assert_eq!(harness::input_by_id(&open, "rate-cap").value(), "20");
+    assert!(harness::any_text(&open, ".schedule-strategy", "Staying under a tax rate"));
+}
+
+#[wasm_bindgen_test]
+async fn the_month_by_month_panel_ranks_nothing() {
+    let root = harness::mount_with(&sixty_forty_state());
+    let html = harness::q(&root, ".panel-schedule").inner_html().to_lowercase();
+    for banned in ["recommend", "should", "winner", "saves you"] {
+        assert!(!html.contains(banned), "the panel describes, never advises: found '{banned}'");
+    }
 }
 
 // =====================================================================

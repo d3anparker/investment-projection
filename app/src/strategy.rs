@@ -24,11 +24,14 @@ use calc::{calculate, CalcInput, CalcOutput, Limit, Order, Plan, Strategy};
 use leptos::*;
 
 use crate::convert::{active_system, keeps_tax_context, StrategyChoice};
-use crate::format::{fmt_money, month_label};
+use crate::format::{fmt_money, money_or_dash, month_label, DASH};
 
 /// One strategy's outcome, reduced to the figures the table shows.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Comparison {
+    /// The [`StrategyChoice`] id of the strategy this row reports, so the row
+    /// can open the month-by-month panel on itself.
+    pub id: &'static str,
     pub label: String,
     /// A one-line plain-English description of how this strategy takes the
     /// money, surfaced as the row's `title` tooltip. Generated from the
@@ -45,15 +48,13 @@ pub struct Comparison {
     pub accounts: String,
 }
 
-/// The em-dash every absent figure reads as.
-const DASH: &str = "\u{2014}";
-
 impl Comparison {
     /// A row with no figures in it. The error arm fills in `label` and
     /// `problem` over the top, so the dash literal lives in one place rather
     /// than once per column.
     fn blank() -> Comparison {
         Comparison {
+            id: "",
             label: String::new(),
             hint: String::new(),
             problem: None,
@@ -75,18 +76,20 @@ impl Comparison {
 /// withheld). Each row's label is derived from the built [`Strategy`] by
 /// [`strategy_label`], never written alongside it.
 pub fn candidates() -> Vec<Strategy> {
-    StrategyChoice::ALL
-        .into_iter()
-        .filter(|c| c.in_comparison())
-        .map(|c| c.build(""))
-        .collect()
+    compared().map(|c| c.build("")).collect()
+}
+
+/// The catalogue entries the comparison shows, in presentation order.
+fn compared() -> impl Iterator<Item = StrategyChoice> {
+    StrategyChoice::ALL.into_iter().filter(|c| c.in_comparison())
 }
 
 /// The comparison row's heading, generated from the strategy so it stays in step
 /// with the behaviour. Descriptive, never evaluative — for the same reason the
 /// figures are ranked by nothing. Keyed off both axes like [`strategy_hint`], so
-/// the two `ByMarginalCost` strategies stay distinct.
-fn strategy_label(strategy: &Strategy) -> String {
+/// the two `ByMarginalCost` strategies stay distinct. Also the month-by-month
+/// panel's heading, so the two never name one strategy two ways.
+pub(crate) fn strategy_label(strategy: &Strategy) -> String {
     match (&strategy.order, &strategy.stop) {
         (Order::ProRata, _) => "Split across everything".to_string(),
         (Order::ByKind(ids), _) => conventional_label(ids),
@@ -118,7 +121,7 @@ fn conventional_label(order: &[String]) -> String {
 /// row's `title` tooltip. Keyed off the strategy so it never drifts from the
 /// behaviour, and descriptive rather than evaluative for the same reason the
 /// labels are — no strategy is called good or bad here.
-fn strategy_hint(strategy: &Strategy) -> String {
+pub(crate) fn strategy_hint(strategy: &Strategy) -> String {
     // Keyed off both axes: the two `ByMarginalCost` strategies read the same
     // order but tell apart by their stop (a rung step vs a rate cap).
     match (&strategy.order, &strategy.stop) {
@@ -149,30 +152,15 @@ pub fn compare(input: &CalcInput) -> Vec<Comparison> {
     if !matches!(input.plan, Plan::Drawdown { .. }) {
         return Vec::new();
     }
-    // Off the input, not off the ambient active system: `compare` is documented
-    // as a function of its argument, and it runs from a *debounced* signal, so
-    // the two can be a keystroke apart.
-    let system = input.tax.as_ref().map(|t| t.system);
 
-    candidates()
-        .into_iter()
-        .map(|strategy| {
+    compared()
+        .map(|choice| {
+            let strategy = choice.build("");
             let label = strategy_label(&strategy);
-            let mut probe = input.clone();
-            if let Plan::Drawdown { strategy: s, .. } = &mut probe.plan {
-                *s = strategy.clone();
-            }
-            // The shared rule, not a second spelling of it: strip the context
-            // from a probe that would not use it. Getting this wrong here is
-            // quiet — a pro-rata row that kept a charge it never paid, or one
-            // whose "left at the end" flatters it by exactly the charge every
-            // other row paid.
-            if system.is_some_and(|sys| !keeps_tax_context(sys, &strategy)) {
-                probe.tax = None;
-            }
-            match calculate(&probe) {
-                Ok(out) => row_for(label, &strategy, &out),
+            match calculate(&probe(input, &strategy)) {
+                Ok(out) => row_for(choice.id(), label, &strategy, &out),
                 Err(e) => Comparison {
+                    id: choice.id(),
                     label,
                     hint: strategy_hint(&strategy),
                     problem: Some(e.message),
@@ -183,7 +171,28 @@ pub fn compare(input: &CalcInput) -> Vec<Comparison> {
         .collect()
 }
 
-fn row_for(label: String, strategy: &Strategy, out: &CalcOutput) -> Comparison {
+/// `input` with its withdrawal order swapped for `strategy`, and its tax context
+/// stripped where that order would not use it.
+///
+/// Shared by the comparison and the month-by-month panel, so a strategy is
+/// projected the same way in both. The stripping is the shared rule
+/// ([`keeps_tax_context`]), not a second spelling of it, and getting it wrong is
+/// quiet — a pro-rata run that kept a charge it never paid, or one whose "left at
+/// the end" flatters it by exactly the charge every other row paid. It reads the
+/// system off the input, not off the ambient active system: both callers run
+/// from a *debounced* signal, so the two can be a keystroke apart.
+pub(crate) fn probe(input: &CalcInput, strategy: &Strategy) -> CalcInput {
+    let mut probe = input.clone();
+    if let Plan::Drawdown { strategy: s, .. } = &mut probe.plan {
+        *s = strategy.clone();
+    }
+    if probe.tax.as_ref().is_some_and(|t| !keeps_tax_context(t.system, strategy)) {
+        probe.tax = None;
+    }
+    probe
+}
+
+fn row_for(id: &'static str, label: String, strategy: &Strategy, out: &CalcOutput) -> Comparison {
     // A pro-rata withdrawal is gross and every other one is net, so the two are
     // not answering the same question. Say so *and* withhold the two figures
     // that would invite the comparison: printing £0.00 tax and a gross total
@@ -211,6 +220,7 @@ fn row_for(label: String, strategy: &Strategy, out: &CalcOutput) -> Comparison {
 
     let dash = DASH.to_string();
     Comparison {
+        id,
         label,
         hint: strategy_hint(strategy),
         problem,
@@ -218,18 +228,32 @@ fn row_for(label: String, strategy: &Strategy, out: &CalcOutput) -> Comparison {
         kept: if untaxed { dash.clone() } else { fmt_money(out.net_withdrawn_total) },
         lasts,
         left: fmt_money(out.projected_total),
-        unused_allowance: if out.unused_allowance_total.is_zero() {
-            DASH.to_string()
-        } else {
-            fmt_money(out.unused_allowance_total)
-        },
+        unused_allowance: money_or_dash(out.unused_allowance_total),
         accounts,
     }
 }
 
-/// The comparison table.
+/// One `<option>` per catalogue strategy, for any select that picks one — the
+/// "Take it" picker and the month-by-month panel's — so the two lists cannot
+/// drift. Static options driven by `selected=`, never `prop:value`, for the
+/// reason in CLAUDE.md: a select's props are set before its options exist.
+pub(crate) fn strategy_options(
+    is_selected: impl Fn(StrategyChoice) -> bool + Copy + 'static,
+) -> impl IntoView {
+    StrategyChoice::ALL
+        .into_iter()
+        .map(|choice| view! {
+            <option value=choice.id() selected=move || is_selected(choice)>
+                {format!("{DASH} {}", choice.picker_label())}
+            </option>
+        })
+        .collect_view()
+}
+
+/// The comparison table. `on_show` is handed a row's strategy id when its
+/// "Month by month" button is pressed.
 #[component]
-pub fn StrategyPanel(rows: Memo<Vec<Comparison>>) -> impl IntoView {
+pub fn StrategyPanel(rows: Memo<Vec<Comparison>>, on_show: Callback<&'static str>) -> impl IntoView {
     view! {
         {move || {
             // Borrow the memo rather than `get()`-cloning the whole `Vec` (each
@@ -278,10 +302,16 @@ pub fn StrategyPanel(rows: Memo<Vec<Comparison>>) -> impl IntoView {
                                         title="How many separate accounts you draw from in a typical year \u{2014} a measure of how fiddly the strategy is to run.">
                                         "Accounts a year"
                                     </th>
+                                    <th scope="col"
+                                        title="Open the month-by-month panel below on this way of taking the money.">
+                                        "Detail"
+                                    </th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {rows.iter().map(|r| view! {
+                                {rows.iter().map(|r| {
+                                    let id = r.id;
+                                    view! {
                                     <tr>
                                         <th scope="row" title=r.hint.clone()>
                                             {r.label.clone()}
@@ -295,7 +325,19 @@ pub fn StrategyPanel(rows: Memo<Vec<Comparison>>) -> impl IntoView {
                                         <td class="num">{r.left.clone()}</td>
                                         <td class="num">{r.unused_allowance.clone()}</td>
                                         <td class="num">{r.accounts.clone()}</td>
+                                        <td>
+                                            // The accessible name extends the
+                                            // visible text with the row it acts
+                                            // on (WCAG 2.5.3), so five identical
+                                            // buttons are told apart.
+                                            <button type="button" class="btn btn-ghost month-link"
+                                                aria-label=format!("Month by month: {}", r.label)
+                                                on:click=move |_| on_show.call(id)>
+                                                "Month by month"
+                                            </button>
+                                        </td>
                                     </tr>
+                                    }
                                 }).collect_view()}
                             </tbody>
                         </table>
@@ -343,6 +385,40 @@ mod tests {
         assert_eq!(
             labels, again,
             "row order must not depend on the strategy in the form, or on the figures"
+        );
+    }
+
+    #[test]
+    fn every_row_carries_its_catalogue_id_so_it_can_open_its_own_months() {
+        // Error rows included: a row that could not run still opens the panel,
+        // which then says why in place of the table.
+        let ids: Vec<&str> = compare(&drawdown_input(Strategy::pro_rata()))
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        let expected: Vec<&str> = compared().map(|c| c.id()).collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn a_probe_keeps_the_tax_context_only_for_an_order_that_uses_it() {
+        let mut input = drawdown_input(Strategy::pro_rata());
+        input.tax = Some(calc::TaxContext {
+            system: active_system(),
+            region: String::new(),
+            other_income: String::new(),
+            age: String::new(),
+            uprate: String::new(),
+            options: Vec::new(),
+        });
+        let net = probe(&input, &Strategy::cheapest_first());
+        assert!(net.tax.is_some(), "a net order is priced");
+        assert!(matches!(net.plan, Plan::Drawdown { ref strategy, .. } if *strategy == Strategy::cheapest_first()));
+        let gross = probe(&input, &Strategy::pro_rata());
+        assert_eq!(
+            gross.tax.is_some(),
+            active_system().has_periodic_charge(),
+            "pro-rata keeps a context only for a system that charges for holding"
         );
     }
 
