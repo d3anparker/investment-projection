@@ -154,12 +154,6 @@ body {
     grid-column: 1 / -1;
   }
 
-  /* The month-by-month panel below it, for the same reason: a column per
-     holding plus the totals is the widest table on the page. */
-  .panel-schedule {
-    grid-column: 1 / -1;
-  }
-
   /* The mode switch is full-width above every panel, so it reads as switching
      the whole context rather than one column. */
   .mode-switch {
@@ -967,12 +961,13 @@ input[type="number"]::-webkit-inner-spin-button {
   margin-top: 8px;
 }
 
-.tax-settings input[type="text"] {
+.tax-settings input[type="text"],
+.sheet-bar input[type="text"] {
   width: 96px;
 }
 
 .tax-settings select,
-.schedule-pick select {
+.sheet-bar select {
   width: auto;
   max-width: 100%;
 }
@@ -1008,8 +1003,9 @@ input[type="number"]::-webkit-inner-spin-button {
   max-width: 22ch;
 }
 
-/* Each comparison row's way into the month-by-month panel. Compact, so the
-   column stays narrow; no top margin, since it sits in a table cell. */
+/* The ways into the month-by-month dialog: one per comparison row, and one
+   beside the "Take it" picker. Compact, so the comparison's column stays
+   narrow; no top margin, since each sits in a cell or beside a control. */
 .month-link {
   margin-top: 0;
   padding: 5px 10px;
@@ -1017,14 +1013,8 @@ input[type="number"]::-webkit-inner-spin-button {
   white-space: nowrap;
 }
 
-/* the month-by-month panel */
-/* Its heading *is* the disclosure button, so the panel reads as one titled card
-   whether it is open or shut. */
-.panel .disclosure-h {
-  margin: 0;
-}
-
-.disclosure,
+/* the month-by-month dialog's contents (its shell is `.sheet`, below) */
+/* Each year's row heading is a button that opens its months. */
 .year-toggle {
   display: inline-flex;
   align-items: center;
@@ -1037,7 +1027,6 @@ input[type="number"]::-webkit-inner-spin-button {
   cursor: pointer;
 }
 
-.disclosure:focus-visible,
 .year-toggle:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
@@ -1061,17 +1050,12 @@ input[type="number"]::-webkit-inner-spin-button {
   transform: rotate(45deg);
 }
 
-.schedule-body {
-  margin-top: 16px;
-}
-
-.schedule-pick {
-  margin-bottom: 14px;
-}
-
+/* The dialog runs nearly the window's width, so the prose above the table is
+   held to a readable measure. */
 .schedule-strategy,
 .schedule-sentence,
 .schedule-problem {
+  max-width: 75ch;
   margin: 0 0 8px;
   font-size: 0.92rem;
   color: var(--muted);
@@ -1081,12 +1065,38 @@ input[type="number"]::-webkit-inner-spin-button {
   color: var(--text);
 }
 
-.schedule-body .depletion-note {
+.schedule-dialog .depletion-note {
   margin: 12px 0;
 }
 
-.schedule-body .table-scroll {
+/* No `.table-scroll` box round this table: `.sheet-body` is the one scroll
+   container, in both directions. A box of its own would be the one a sticky
+   heading sticks to, and it never scrolls vertically. */
+.schedule {
   margin-top: 14px;
+}
+
+/* Headings that stay put: the holding names along the top, and the period
+   down the side, however far the reader has scrolled either way. Opaque, so
+   the figures pass under them rather than through them.
+   The offsets are the body's padding, negated. A sticky box sticks inside its
+   scroll container's padding, so at `0` the headings would stop short of the
+   edge and the figures would show through the strip beyond them. */
+.schedule thead th {
+  position: sticky;
+  top: calc(-1 * var(--sheet-pad-y));
+  z-index: 2;
+  padding-top: 10px;
+  background: var(--panel);
+  /* A collapsed border is painted by the table, not the cell, so it would be
+     left behind as the heading moved. A shadow travels with it. */
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+
+/* "Period" sticks both ways, over both. */
+.schedule thead th:first-child {
+  left: calc(-1 * var(--sheet-pad-x));
+  z-index: 3;
 }
 
 /* A holding's account and return, under its name. Sentence case: the heading
@@ -1101,8 +1111,16 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 /* Row headings read as labels, not as more column headings. They take the
-   cells' padding, rule and size from the `.breakdown td` rule. */
+   cells' padding, rule and size from the `.breakdown td` rule, and stick down
+   the side as the column headings stick along the top. */
 .schedule tbody th[scope="row"] {
+  position: sticky;
+  left: calc(-1 * var(--sheet-pad-x));
+  z-index: 1;
+  background: var(--panel);
+  /* The row's rule, carried with the heading for the thead's reason: the
+     collapsed border stays put, and the heading would slide over it. */
+  box-shadow: inset 0 1px 0 var(--line);
   font-weight: 600;
   text-transform: none;
   letter-spacing: normal;
@@ -1111,14 +1129,24 @@ input[type="number"]::-webkit-inner-spin-button {
   white-space: nowrap;
 }
 
-/* The starting values are a balance, not a withdrawal: set apart so the row
-   is not read as the first month. The closing "nothing left" row likewise
-   reads as a note, not a figure. */
+/* The starting and closing values are balances, not withdrawals: set apart so
+   neither row is read as a month. The "nothing left" row likewise reads as a
+   note, not a figure. */
 .schedule .schedule-start th[scope="row"],
 .schedule .schedule-start td,
+.schedule .schedule-final th[scope="row"],
+.schedule .schedule-final td,
 .schedule-end td {
   color: var(--muted);
   font-style: italic;
+}
+
+/* The note spans the whole row, so the cell itself cannot stick; its words
+   do, inside it, and stay in view down the side with the period column. */
+.schedule-end-note {
+  position: sticky;
+  left: calc(-1 * var(--sheet-pad-x) + 6px);
+  display: inline-block;
 }
 
 /* A year's months, indented under it on the raised surface. */
@@ -1130,6 +1158,9 @@ input[type="number"]::-webkit-inner-spin-button {
   padding-left: 30px;
   font-weight: 400;
   color: var(--muted);
+  /* Its row's raised surface, which the sticky heading would otherwise cover
+     with the panel's. */
+  background: var(--panel-2);
 }
 
 /* The year button's pointer target reaches the full row height without
@@ -1221,27 +1252,18 @@ input[type="number"]::-webkit-inner-spin-button {
   margin-top: 12px;
 }
 
-/* --- Glossary ------------------------------------------------------------
-   A native <dialog>, so the focus trap, Esc, the inert background and the top
-   layer come from the platform. Written mobile-first: the base rule is the
-   full-bleed sheet, and the media query below relaxes it into a panel.
+/* --- Sheets: the glossary and the month-by-month view ---------------------
+   Both are native <dialog>s shown with showModal(), so the focus trap, Esc,
+   the inert background and the top layer come from the platform. `.sheet` is
+   the shell they share; each adds only its own size and contents. Written
+   mobile-first: the base rule is the full-bleed sheet, and the media query
+   below relaxes it into a panel.
    Note the units: dvw/dvh, never vw/vh, or mobile browser chrome crops the
-   foot of the list where the last definitions are. */
-.glossary-open {
-  /* .btn-ghost carries a 12px top margin for the form's own buttons; on the
-     mode-switch row the button sits inline beside the picker. */
-  margin-top: 0;
-  margin-left: 16px;
-  padding: 6px 12px;
-  font-size: 0.82rem;
-  color: var(--muted-strong);
-}
-.glossary-open:hover {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.glossary-dialog {
+   foot of the body, where the last definitions and the last years are. */
+.sheet {
+  /* The gutter the head, bar and body share. Named, because a sticky heading
+     in the body has to undo it (see `.schedule thead th`). */
+  --sheet-pad-x: 16px;
   width: 100dvw;
   max-width: 100dvw;
   height: 100dvh;
@@ -1256,42 +1278,106 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 /* Scoped to [open] deliberately: an unscoped `display: flex` would override the
    user agent's `display: none` and leave the dialog on the page while closed. */
-.glossary-dialog[open] {
+.sheet[open] {
   display: flex;
   flex-direction: column;
 }
-.glossary-dialog::backdrop {
+.sheet::backdrop {
   background: rgba(8, 12, 20, 0.62);
 }
 
 /* A flex item rather than `position: sticky` — the header simply does not
    scroll, so Close is always reachable without scrolling back up. */
-.glossary-head {
+.sheet-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 14px var(--sheet-pad-x);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
-.glossary-head h2 {
+.sheet-head h2 {
   margin: 0;
   font-size: 1.1rem;
 }
-.glossary-close {
+.sheet-close {
   margin-top: 0;
   flex: none;
 }
 
-.glossary-body {
+/* Between the fixed header and the scrolling body: the controls that act on
+   what the body shows (the glossary's filter, the strategy the months are
+   for), so they stay reachable however far down the reader has scrolled. */
+.sheet-bar {
+  padding: 10px var(--sheet-pad-x);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.sheet-body {
+  /* Named for the same reason as the gutter. */
+  --sheet-pad-y: 16px;
   flex: 1;
   min-height: 0;
-  padding: 16px;
-  overflow-y: auto;
+  padding: var(--sheet-pad-y) var(--sheet-pad-x);
+  overflow: auto;
   /* Without this a flick at the end of the list scrolls the form behind. */
   overscroll-behavior: contain;
 }
+
+@media (min-width: 760px) {
+  /* A sheet's size is read from `--sheet-w`/`--sheet-h` where it sets them, so
+     a wider one overrides the default wherever its rule sits. */
+  .sheet {
+    --sheet-pad-x: 24px;
+    width: var(--sheet-w, min(1100px, 94dvw));
+    max-width: var(--sheet-w, min(1100px, 94dvw));
+    height: var(--sheet-h, 92dvh);
+    max-height: var(--sheet-h, 92dvh);
+    margin: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .sheet-head {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+  .sheet-body {
+    --sheet-pad-y: 20px;
+  }
+}
+
+/* The widest table on the page, so it takes nearly the whole window, with a
+   margin of backdrop left to say the page is still there behind it. Read only
+   by the panel-sized sheet above 760px; on a phone every sheet is full-bleed. */
+.schedule-dialog {
+  --sheet-w: min(1600px, 96dvw);
+  --sheet-h: 94dvh;
+}
+
+@media (prefers-color-scheme: light) {
+  .sheet::backdrop {
+    background: rgba(16, 23, 34, 0.42);
+  }
+}
+
+/* --- Glossary ------------------------------------------------------------ */
+.glossary-open {
+  /* .btn-ghost carries a 12px top margin for the form's own buttons; on the
+     mode-switch row the button sits inline beside the picker. */
+  margin-top: 0;
+  margin-left: 16px;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  color: var(--muted-strong);
+}
+.glossary-open:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .glossary-intro {
   margin: 0 0 18px;
   max-width: 62ch;
@@ -1352,22 +1438,6 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 @media (min-width: 760px) {
-  .glossary-dialog {
-    width: min(1100px, 94dvw);
-    max-width: min(1100px, 94dvw);
-    height: 92dvh;
-    max-height: 92dvh;
-    margin: auto;
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-  }
-  .glossary-head {
-    padding: 16px 24px;
-  }
-  .glossary-body {
-    padding: 20px 24px;
-  }
   /* The definition is the long part, so the term takes a fixed track rather
      than a share of the width. */
   .gloss-item {
@@ -1377,12 +1447,6 @@ input[type="number"]::-webkit-inner-spin-button {
   }
   .gloss-item dd {
     margin: 0;
-  }
-}
-
-@media (prefers-color-scheme: light) {
-  .glossary-dialog::backdrop {
-    background: rgba(16, 23, 34, 0.42);
   }
 }
 
@@ -1416,13 +1480,7 @@ input[type="number"]::-webkit-inner-spin-button {
   margin-bottom: 0;
 }
 
-/* The filter sits between the fixed header and the scrolling body, so it stays
-   reachable however far down the list the reader has scrolled. */
-.glossary-filter {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}
+/* The filter is the glossary's `.sheet-bar`; it takes the bar's width. */
 .glossary-filter input {
   width: 100%;
   max-width: 420px;
@@ -1430,9 +1488,4 @@ input[type="number"]::-webkit-inner-spin-button {
 .glossary-empty {
   margin: 0;
   color: var(--muted-strong);
-}
-@media (min-width: 760px) {
-  .glossary-filter {
-    padding: 10px 24px;
-  }
 }

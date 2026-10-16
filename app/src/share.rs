@@ -73,15 +73,11 @@ pub struct ShareState {
     /// working; hence no `VERSION` bump.
     #[serde(default)]
     pub jurisdiction: String,
-    /// Whether the month-by-month panel is open. A view setting rather than a
-    /// projection input, carried so a shared link opens on what its sender was
-    /// looking at. `#[serde(default)]`: an older link opens with it closed.
-    #[serde(default)]
-    pub schedule_open: bool,
-    /// Which withdrawal strategy the month-by-month panel shows, as a
-    /// `StrategyChoice` id. Blank follows the "Take it" picker.
-    #[serde(default)]
-    pub schedule_strategy: String,
+    // `schedule_open` and `schedule_strategy` were carried here while the
+    // month-by-month view was a panel. They were retired when it became a
+    // modal: "Copy link" is behind the backdrop while it is open, so a link
+    // could only ever say it was shut. Links that still carry them decode,
+    // because serde ignores a key it does not know.
 }
 
 fn default_horizon_value() -> String {
@@ -155,8 +151,6 @@ impl ShareState {
             uprate: String::new(),
             options: std::collections::BTreeMap::new(),
             jurisdiction: String::new(),
-            schedule_open: false,
-            schedule_strategy: String::new(),
         }
     }
 }
@@ -264,8 +258,6 @@ mod tests {
             uprate: "2".into(),
             options: [("joint".to_string(), "true".to_string())].into_iter().collect(),
             jurisdiction: "de".into(),
-            schedule_open: true,
-            schedule_strategy: "preserve".into(),
         }
     }
 
@@ -325,9 +317,20 @@ mod tests {
         assert_eq!(s.withdrawal, "");
         assert_eq!(s.goal_target, "");
         assert_eq!(s.goal_kind, "topup");
-        assert!(!s.schedule_open, "a link from before the panel existed opens it closed");
-        assert_eq!(s.schedule_strategy, "");
         assert_eq!(s.rows.len(), 1);
+        assert_eq!(s.rows[0].name, "A");
+    }
+
+    #[test]
+    fn a_link_from_the_month_by_month_panel_still_opens() {
+        // Links copied while the month-by-month view was a panel carry two
+        // keys that no longer exist. They must still decode, not fall back to
+        // the example, so a retired key never costs a link its portfolio.
+        let payload = URL_SAFE_NO_PAD.encode(
+            r#"{"v":2,"rows":[{"name":"A","value":"1000","rate":"7","contribution":"0"}],"plan":"drawdown","schedule_open":true,"schedule_strategy":"preserve"}"#,
+        );
+        let s = decode(&format!("v={payload}")).expect("unknown keys are ignored");
+        assert_eq!(s.plan, "drawdown");
         assert_eq!(s.rows[0].name, "A");
     }
 

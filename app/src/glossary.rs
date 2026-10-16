@@ -13,6 +13,8 @@
 use leptos::*;
 use taxkit::GlossaryEntry;
 
+use crate::sheet::{focus_trigger, sheet_head};
+
 /// Topic labels for the app's own terms.
 mod topics {
     pub const SHAPE: &str = "The projection";
@@ -377,10 +379,13 @@ fn glossary_view(heading: String, entries: &'static [GlossaryEntry], needle: &st
 #[component]
 pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
     let dialog: NodeRef<html::Dialog> = create_node_ref();
+    let trigger: NodeRef<html::Button> = create_node_ref();
     let open = create_rw_signal(false);
     let query = create_rw_signal(String::new());
 
     let show = move |_| {
+        // So that closing hands focus back here, in Safari too.
+        focus_trigger(trigger);
         // A stale filter from last time would look like a half-empty glossary.
         query.set(String::new());
         open.set(true);
@@ -388,12 +393,6 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
             let _ = d.show_modal();
         }
     };
-    let hide = move |_| {
-        if let Some(d) = dialog.get_untracked() {
-            d.close();
-        }
-    };
-
     let system = move || crate::jurisdiction::system_from(&jurisdiction.get());
 
     view! {
@@ -402,6 +401,7 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
         <button
             type="button"
             class="btn btn-ghost glossary-open"
+            node_ref=trigger
             aria-label="Glossary \u{2014} what these terms mean"
             aria-haspopup="dialog"
             on:click=show
@@ -409,20 +409,15 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
             "Glossary"
         </button>
         <dialog
-            class="glossary-dialog"
+            class="sheet glossary-dialog"
             node_ref=dialog
             aria-labelledby="glossary-h"
             on:close=move |_| open.set(false)
         >
-            <div class="glossary-head">
-                <h2 id="glossary-h">"Glossary"</h2>
-                <button type="button" class="btn btn-ghost glossary-close" on:click=hide>
-                    "Close"
-                </button>
-            </div>
+            {sheet_head("glossary-h", "Glossary", dialog)}
             // Its own bar between the header and the scrolling body, so it
             // stays reachable however far down the list the reader has got.
-            <div class="glossary-filter">
+            <div class="sheet-bar glossary-filter">
                 <input
                     type="search"
                     aria-label="Filter glossary terms"
@@ -431,7 +426,7 @@ pub fn Glossary(#[prop(into)] jurisdiction: Signal<String>) -> impl IntoView {
                     on:input=move |ev| query.set(event_target_value(&ev))
                 />
             </div>
-            <div class="glossary-body">
+            <div class="sheet-body glossary-body">
                 {move || {
                     open.get()
                         .then(|| {

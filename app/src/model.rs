@@ -1,4 +1,5 @@
-//! The reactive editor-row model and the DOM helpers that operate on it.
+//! The reactive editor-row model and the DOM helpers that operate on it, plus
+//! the text-input helpers every form control is built from.
 //!
 //! This is the one part of the split that genuinely needs leptos/`web_sys`
 //! (signals, `NodeRef`, focus), so it is browser-verified rather than natively
@@ -6,6 +7,8 @@
 //! is factored out as the pure [`label_for`], which *is* unit-tested.
 
 use leptos::*;
+
+use crate::outcome::invalid_attrs_by;
 
 /// One editable row. Every field is its own signal so typing in one cell does
 /// not disturb the others. `Copy` because all fields are `Copy`.
@@ -121,6 +124,56 @@ pub fn bind_value(sig: RwSignal<String>) -> NodeRef<html::Input> {
         }
     });
     node
+}
+
+/// A text `<input>` wired to `sig`, carrying the invalid-state a11y contract —
+/// `aria-invalid` + `aria-describedby` + `.field-invalid`, all driven by `bad` —
+/// in one place rather than repeated per control. The single spelling of that
+/// contract is what stops one control quietly drifting out of step with the rest.
+/// `message_id` is the line that explains the error: the form's
+/// [`ERROR_ID`](crate::outcome::ERROR_ID), or a dialog's own when the form's is
+/// behind its backdrop.
+pub(crate) fn aria_text_input(
+    id: &'static str,
+    inputmode: &'static str,
+    placeholder: &'static str,
+    node_ref: NodeRef<html::Input>,
+    sig: RwSignal<String>,
+    bad: Memo<bool>,
+    message_id: &'static str,
+) -> impl IntoView {
+    view! {
+        <input id=id type="text" inputmode=inputmode placeholder=placeholder node_ref=node_ref
+            aria-invalid=move || invalid_attrs_by(bad.get(), message_id).0
+            aria-describedby=move || invalid_attrs_by(bad.get(), message_id).1
+            class:field-invalid=move || bad.get()
+            on:input=move |ev| sig.set(event_target_value(&ev)) />
+    }
+}
+
+/// One `label → adorned decimal input → trailing words` period-row, the shape the
+/// tax fieldset repeats. `adorn` is the adornment suffix (`"money"` / `"pct"`);
+/// the a11y contract comes from [`aria_text_input`].
+pub(crate) fn adorned_field(
+    id: &'static str,
+    label: &'static str,
+    adorn: &'static str,
+    placeholder: &'static str,
+    suffix: &'static str,
+    node_ref: NodeRef<html::Input>,
+    sig: RwSignal<String>,
+    bad: Memo<bool>,
+    message_id: &'static str,
+) -> impl IntoView {
+    view! {
+        <div class="period-row">
+            <label for=id>{label}</label>
+            <span class=format!("adorn adorn-{adorn}")>
+                {aria_text_input(id, "decimal", placeholder, node_ref, sig, bad, message_id)}
+            </span>
+            <span>{suffix}</span>
+        </div>
+    }
 }
 
 #[cfg(test)]

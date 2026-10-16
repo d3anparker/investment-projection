@@ -25,12 +25,13 @@ use leptos::*;
 
 use crate::convert::{active_system, keeps_tax_context, StrategyChoice};
 use crate::format::{fmt_money, money_or_dash, month_label, DASH};
+use crate::sheet::focus_trigger;
 
 /// One strategy's outcome, reduced to the figures the table shows.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Comparison {
     /// The [`StrategyChoice`] id of the strategy this row reports, so the row
-    /// can open the month-by-month panel on itself.
+    /// can open the month-by-month dialog on itself.
     pub id: &'static str,
     pub label: String,
     /// A one-line plain-English description of how this strategy takes the
@@ -174,7 +175,7 @@ pub fn compare(input: &CalcInput) -> Vec<Comparison> {
 /// `input` with its withdrawal order swapped for `strategy`, and its tax context
 /// stripped where that order would not use it.
 ///
-/// Shared by the comparison and the month-by-month panel, so a strategy is
+/// Shared by the comparison and the month-by-month dialog, so a strategy is
 /// projected the same way in both. The stripping is the shared rule
 /// ([`keeps_tax_context`]), not a second spelling of it, and getting it wrong is
 /// quiet — a pro-rata run that kept a charge it never paid, or one whose "left at
@@ -234,7 +235,7 @@ fn row_for(id: &'static str, label: String, strategy: &Strategy, out: &CalcOutpu
 }
 
 /// One `<option>` per catalogue strategy, for any select that picks one — the
-/// "Take it" picker and the month-by-month panel's — so the two lists cannot
+/// "Take it" picker and the month-by-month dialog's — so the two lists cannot
 /// drift. Static options driven by `selected=`, never `prop:value`, for the
 /// reason in CLAUDE.md: a select's props are set before its options exist.
 pub(crate) fn strategy_options(
@@ -250,101 +251,136 @@ pub(crate) fn strategy_options(
         .collect_view()
 }
 
+/// A "Month by month" button, which hands `on_show` the [`StrategyChoice`] id
+/// it opens the month-by-month dialog on: a comparison row's, or blank for the
+/// one beside the "Take it" picker. The accessible name extends the visible text
+/// with `label` (WCAG 2.5.3), so identical buttons are told apart, and
+/// `data-strategy` carries the id for anything that has to find the button
+/// again (the UI suite does).
+///
+/// It takes focus as it opens the dialog, which is what lets the dialog hand
+/// focus back to it on close: see [`focus_trigger`].
+pub(crate) fn month_link(
+    id: &'static str,
+    label: MaybeSignal<String>,
+    on_show: Callback<&'static str>,
+) -> impl IntoView {
+    let button = create_node_ref::<html::Button>();
+    view! {
+        <button type="button" class="btn btn-ghost month-link" node_ref=button
+            data-strategy=id
+            aria-haspopup="dialog"
+            aria-label=move || format!("Month by month: {}", label.get())
+            on:click=move |_| {
+                focus_trigger(button);
+                on_show.call(id);
+            }>
+            "Month by month"
+        </button>
+    }
+}
+
 /// The comparison table. `on_show` is handed a row's strategy id when its
-/// "Month by month" button is pressed.
+/// "Month by month" button is pressed, and opens the month-by-month dialog.
+///
+/// Built once, not on every recomputation: the caller mounts it only while there
+/// is anything to compare, and its rows are keyed by strategy, each reading its
+/// own figures. So a recomputation rewrites the figures that changed and nothing
+/// else. That is load-bearing, not tidiness: a row's button is what the
+/// month-by-month dialog hands focus back to on close, and a debounce can land
+/// while the dialog is open. Rebuilt, the button would be gone.
 #[component]
 pub fn StrategyPanel(rows: Memo<Vec<Comparison>>, on_show: Callback<&'static str>) -> impl IntoView {
     view! {
-        {move || {
-            // Borrow the memo rather than `get()`-cloning the whole `Vec` (each
-            // `Comparison` carries several strings): the rows are consumed to
-            // build `<tr>`s here and never escape the closure, so a shared
-            // reference is enough. Cloning stays where it is unavoidable — the
-            // per-row strings that move into the DOM.
-            rows.with(|rows| (!rows.is_empty()).then(|| view! {
-                <div class="strategy-compare">
-                    <div class="table-scroll">
-                        <table class="breakdown">
-                            <caption class="table-note">
-                                "Ways of taking the same income, and what each costs. \
-                                 They are not ranked: which one is \u{201c}best\u{201d} depends on \
-                                 whether you care most about tax, about how long the money lasts, \
-                                 about what is left at the end, or about how little you want to \
-                                 think about it."
-                            </caption>
-                            <thead>
-                                <tr>
-                                    <th scope="col"
-                                        title="How the monthly income is taken from your holdings. Hover a row's name for what it does.">
-                                        "Take it"
-                                    </th>
-                                    <th scope="col"
-                                        title="Total tax paid across the whole drawdown period.">
-                                        "Tax"
-                                    </th>
-                                    <th scope="col"
-                                        title="Net income you actually receive, after tax, across the whole drawdown.">
-                                        "Kept"
-                                    </th>
-                                    <th scope="col"
-                                        title="Whether the pot lasts the full drawdown period, or the month it runs out.">
-                                        "How long"
-                                    </th>
-                                    <th scope="col"
-                                        title="What the portfolio is still worth when the drawdown period ends.">
-                                        "Left at the end"
-                                    </th>
-                                    <th scope="col"
-                                        title="Tax-free allowance left unclaimed \u{2014} headroom you could have drawn tax-free but did not. Lower means more of your allowances were used.">
-                                        "Allowance unused"
-                                    </th>
-                                    <th scope="col"
-                                        title="How many separate accounts you draw from in a typical year \u{2014} a measure of how fiddly the strategy is to run.">
-                                        "Accounts a year"
-                                    </th>
-                                    <th scope="col"
-                                        title="Open the month-by-month panel below on this way of taking the money.">
-                                        "Detail"
-                                    </th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {rows.iter().map(|r| {
-                                    let id = r.id;
-                                    view! {
-                                    <tr>
-                                        <th scope="row" title=r.hint.clone()>
-                                            {r.label.clone()}
-                                            {r.problem.clone().map(|p| view! {
-                                                <span class="strategy-note">{p}</span>
-                                            })}
-                                        </th>
-                                        <td class="num">{r.tax.clone()}</td>
-                                        <td class="num">{r.kept.clone()}</td>
-                                        <td>{r.lasts.clone()}</td>
-                                        <td class="num">{r.left.clone()}</td>
-                                        <td class="num">{r.unused_allowance.clone()}</td>
-                                        <td class="num">{r.accounts.clone()}</td>
-                                        <td>
-                                            // The accessible name extends the
-                                            // visible text with the row it acts
-                                            // on (WCAG 2.5.3), so five identical
-                                            // buttons are told apart.
-                                            <button type="button" class="btn btn-ghost month-link"
-                                                aria-label=format!("Month by month: {}", r.label)
-                                                on:click=move |_| on_show.call(id)>
-                                                "Month by month"
-                                            </button>
-                                        </td>
-                                    </tr>
-                                    }
-                                }).collect_view()}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            }))
-        }}
+        <div class="strategy-compare">
+            <div class="table-scroll">
+                <table class="breakdown">
+                    <caption class="table-note">
+                        "Ways of taking the same income, and what each costs. \
+                         They are not ranked: which one is \u{201c}best\u{201d} depends on \
+                         whether you care most about tax, about how long the money lasts, \
+                         about what is left at the end, or about how little you want to \
+                         think about it."
+                    </caption>
+                    <thead>
+                        <tr>
+                            <th scope="col"
+                                title="How the monthly income is taken from your holdings. Hover a row's name for what it does.">
+                                "Take it"
+                            </th>
+                            <th scope="col"
+                                title="Total tax paid across the whole drawdown period.">
+                                "Tax"
+                            </th>
+                            <th scope="col"
+                                title="Net income you actually receive, after tax, across the whole drawdown.">
+                                "Kept"
+                            </th>
+                            <th scope="col"
+                                title="Whether the pot lasts the full drawdown period, or the month it runs out.">
+                                "How long"
+                            </th>
+                            <th scope="col"
+                                title="What the portfolio is still worth when the drawdown period ends.">
+                                "Left at the end"
+                            </th>
+                            <th scope="col"
+                                title="Tax-free allowance left unclaimed \u{2014} headroom you could have drawn tax-free but did not. Lower means more of your allowances were used.">
+                                "Allowance unused"
+                            </th>
+                            <th scope="col"
+                                title="How many separate accounts you draw from in a typical year \u{2014} a measure of how fiddly the strategy is to run.">
+                                "Accounts a year"
+                            </th>
+                            <th scope="col"
+                                title="See how this way of taking the money would draw on each holding, month by month.">
+                                "Detail"
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <For
+                            each=move || rows.with(|r| r.iter().map(|c| c.id).collect::<Vec<_>>())
+                            key=|id| *id
+                            children=move |id| comparison_row(rows, id, on_show)
+                        />
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+}
+
+/// One strategy's row. It reads its figures through a memo of its own, so a
+/// recomputation that leaves them alone notifies nothing here, and one that
+/// changes them rewrites only the cells, never the row or its button.
+fn comparison_row(
+    rows: Memo<Vec<Comparison>>,
+    id: &'static str,
+    on_show: Callback<&'static str>,
+) -> impl IntoView {
+    // Borrow the rows to find this one, and clone only it. The fallback covers
+    // the moment between the rows dropping this id and `For` dropping the row.
+    let row = create_memo(move |_| {
+        rows.with(|r| r.iter().find(|c| c.id == id).cloned()).unwrap_or_else(Comparison::blank)
+    });
+    let cell = move |field: fn(&Comparison) -> String| move || row.with(field);
+    view! {
+        <tr>
+            <th scope="row" title=cell(|r| r.hint.clone())>
+                {cell(|r| r.label.clone())}
+                {move || row.with(|r| r.problem.clone()).map(|p| view! {
+                    <span class="strategy-note">{p}</span>
+                })}
+            </th>
+            <td class="num">{cell(|r| r.tax.clone())}</td>
+            <td class="num">{cell(|r| r.kept.clone())}</td>
+            <td>{cell(|r| r.lasts.clone())}</td>
+            <td class="num">{cell(|r| r.left.clone())}</td>
+            <td class="num">{cell(|r| r.unused_allowance.clone())}</td>
+            <td class="num">{cell(|r| r.accounts.clone())}</td>
+            <td>{month_link(id, Signal::derive(cell(|r| r.label.clone())).into(), on_show)}</td>
+        </tr>
     }
 }
 
@@ -390,7 +426,7 @@ mod tests {
 
     #[test]
     fn every_row_carries_its_catalogue_id_so_it_can_open_its_own_months() {
-        // Error rows included: a row that could not run still opens the panel,
+        // Error rows included: a row that could not run still opens the dialog,
         // which then says why in place of the table.
         let ids: Vec<&str> = compare(&drawdown_input(Strategy::pro_rata()))
             .iter()

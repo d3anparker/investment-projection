@@ -64,8 +64,18 @@ impl Outcome {
 /// `aria-invalid`/`aria-describedby` values for a control, or `None` to leave
 /// both attributes off entirely.
 pub fn invalid_attrs(flagged: bool) -> (Option<&'static str>, Option<&'static str>) {
+    invalid_attrs_by(flagged, ERROR_ID)
+}
+
+/// [`invalid_attrs`] for a control whose message is not the form's `.error-msg`
+/// — the month-by-month dialog's cap box, whose message has to sit in the
+/// dialog because the form's is behind the backdrop.
+pub fn invalid_attrs_by(
+    flagged: bool,
+    message_id: &'static str,
+) -> (Option<&'static str>, Option<&'static str>) {
     if flagged {
-        (Some("true"), Some(ERROR_ID))
+        (Some("true"), Some(message_id))
     } else {
         (None, None)
     }

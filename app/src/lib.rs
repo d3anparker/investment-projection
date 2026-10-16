@@ -14,8 +14,10 @@
 //!   [`panel`]'s shared last-good/`.stale` shell.
 //! - [`strategy`] — the side-by-side comparison of withdrawal orders, which
 //!   reports several axes and deliberately ranks none of them.
-//! - [`schedule`] — the collapsible month-by-month panel: how one of those
+//! - [`schedule`] — the full-screen month-by-month dialog: how one of those
 //!   strategies would take the money out, holding by holding, year by year.
+//! - [`sheet`] — what that dialog shares with the [`glossary`]: the header, and
+//!   how a trigger takes focus so that closing can hand it back.
 //! - [`freshness`] — whether the tax figures are still current. Reads the clock
 //!   here, at the edge, so `calc` stays a pure function of the form.
 //! - [`format`] / [`chart`] — `Decimal`→string formatting and the SVG chart.
@@ -39,6 +41,7 @@ pub mod panel;
 pub mod results;
 pub mod schedule;
 pub mod share;
+pub mod sheet;
 pub mod strategy;
 pub mod summary;
 

@@ -926,8 +926,6 @@ fn state_of(rows: Vec<RowData>, horizon_value: &str, horizon_unit: &str) -> Shar
         uprate: String::new(),
         options: std::collections::BTreeMap::new(),
         jurisdiction: String::new(),
-        schedule_open: false,
-        schedule_strategy: String::new(),
     }
 }
 
@@ -1108,13 +1106,11 @@ async fn a_charging_system_keeps_its_tax_details_under_pro_rata() {
 
 /// Open the glossary and hand back the `<dialog>`.
 ///
-/// The button is focused first: `showModal()` restores focus to whatever was
-/// focused when it opened, and a programmatic `.click()` does not focus a
-/// button on its own.
+/// The button is not focused first. A programmatic `.click()` focuses nothing,
+/// just as Safari's real one does not, so every test that opens the glossary
+/// runs the case where the trigger has to take focus itself.
 fn open_glossary(root: &web_sys::Element) -> web_sys::Element {
-    let btn = harness::find_button(root, "Glossary");
-    btn.focus().unwrap();
-    harness::click(&btn);
+    harness::click(&harness::find_button(root, "Glossary"));
     harness::q(root, "dialog.glossary-dialog")
 }
 
@@ -1122,7 +1118,8 @@ fn open_glossary(root: &web_sys::Element) -> web_sys::Element {
 /// of the page inert, and earlier mounts stay in the document for the whole
 /// run — so one leaked dialog would break every test after it.
 fn close_glossary(root: &web_sys::Element) {
-    harness::click(&harness::find_button(root, "Close"));
+    // Scoped: the month-by-month dialog has a Close button too.
+    harness::click(&harness::q(root, ".glossary-dialog .sheet-close"));
 }
 
 #[wasm_bindgen_test]
@@ -1133,7 +1130,11 @@ async fn the_glossary_button_opens_a_modal_and_close_returns_focus() {
     let dialog = harness::q(&root, "dialog.glossary-dialog");
     assert!(!dialog.has_attribute("open"), "the dialog starts closed");
 
-    btn.focus().unwrap();
+    // Not focused before the click, as in Safari, where clicking a button
+    // does not focus it. The dialog can only hand focus back to the button if
+    // the button takes it as it opens the dialog.
+    let trigger: &web_sys::Element = btn.as_ref();
+    assert!(harness::active_element().as_ref() != Some(trigger), "nothing has focused it yet");
     harness::click(&btn);
     assert!(dialog.has_attribute("open"), "clicking the button opens it");
 
@@ -1430,7 +1431,7 @@ async fn the_german_year_control_asks_a_past_question_when_already_drawing() {
 }
 
 // =====================================================================
-// The month-by-month panel
+// The month-by-month dialog
 // =====================================================================
 
 /// £6,000 and £4,000 at 0%, already drawing £1,000 a month over two years: an
@@ -1439,7 +1440,6 @@ fn sixty_forty_state() -> ShareState {
     let mut s = already_drawing_state(vec![row("Alpha", "6000", "0", "0"), row("Beta", "4000", "0", "0")]);
     s.drawdown_value = "2".into();
     s.withdrawal = "1000".into();
-    s.schedule_open = true;
     s
 }
 
@@ -1451,24 +1451,79 @@ fn year_toggle(root: &web_sys::Element, label: &str) -> web_sys::Element {
         .unwrap_or_else(|| panic!("no year toggle reading {label}"))
 }
 
-#[wasm_bindgen_test]
-async fn the_month_by_month_panel_starts_shut_and_draws_nothing_up() {
-    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
-    let toggle = harness::q(&root, ".panel-schedule .disclosure");
-    assert_eq!(toggle.get_attribute("aria-expanded").as_deref(), Some("false"));
-    assert_eq!(toggle.get_attribute("aria-controls").as_deref(), Some("schedule-body"));
-    assert!(harness::q(&root, "#schedule-body").has_attribute("hidden"));
-    assert!(harness::q_opt(&root, ".schedule").is_none(), "nothing is drawn up while it is shut");
+/// The comparison row's "Month by month" button for strategy `id`.
+fn row_trigger(root: &web_sys::Element, id: &str) -> web_sys::Element {
+    harness::q(root, &format!(".strategy-compare .month-link[data-strategy=\"{id}\"]"))
+}
 
-    // It belongs to the comparison, so it is absent wherever that is.
-    let deposits = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
-    assert!(harness::q_opt(&deposits, ".panel-schedule").is_none());
+/// The "Month by month" button beside the "Take it" picker.
+fn picker_trigger(root: &web_sys::Element) -> web_sys::Element {
+    harness::q(root, ".tax-settings .month-link")
+}
+
+/// The schedule's last body, checked to be the "Value at the end" row: the
+/// table closes on it, after any "Nothing left" note.
+fn closing_row(root: &web_sys::Element) -> web_sys::Element {
+    let closing = harness::q(root, ".schedule tbody:last-of-type");
+    assert_eq!(closing.get_attribute("class").as_deref(), Some("schedule-final"));
+    closing
+}
+
+/// Open the month-by-month dialog with `trigger` and hand back the `<dialog>`.
+///
+/// The trigger is not focused first, for `open_glossary`'s reason: a
+/// programmatic `.click()` focuses nothing, as Safari's does not, so the
+/// trigger has to take focus itself for the dialog to hand it back.
+async fn open_schedule(root: &web_sys::Element, trigger: &web_sys::Element) -> web_sys::Element {
+    harness::click(trigger);
+    harness::settle().await;
+    let dialog = harness::q(root, "dialog.schedule-dialog");
+    assert!(dialog.has_attribute("open"), "the trigger opens the dialog");
+    dialog
+}
+
+/// Close the month-by-month dialog, and wait for its `close` event.
+///
+/// Every test that opens the dialog must close it: a modal left open makes the
+/// rest of the page inert, and earlier mounts stay in the document for the whole
+/// run. The wait matters too. The browser queues `close` as a task rather than
+/// firing it at once, and that handler is where the dialog empties its body and
+/// puts focus back — so a test reading either, or the next test, must not run
+/// ahead of it.
+async fn close_schedule(root: &web_sys::Element) {
+    let dialog = harness::q(root, "dialog.schedule-dialog");
+    harness::click(&harness::q(&dialog, ".sheet-close"));
+    assert!(!dialog.has_attribute("open"), "Close closes it");
+    for _ in 0..100 {
+        if harness::q(&dialog, ".sheet-body").child_element_count() == 0 {
+            return;
+        }
+        harness::sleep(10).await;
+    }
+    panic!("the dialog's close event never arrived");
 }
 
 #[wasm_bindgen_test]
-async fn a_comparison_row_opens_the_panel_on_its_own_strategy() {
-    // Picked: pro-rata. The row's button points the panel elsewhere without
-    // touching the picker, and takes focus to the panel it opened.
+async fn the_month_by_month_dialog_starts_shut_and_draws_nothing_up() {
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest"));
+    let dialog = harness::q(&root, "dialog.schedule-dialog");
+    assert!(!dialog.has_attribute("open"));
+    assert!(harness::q_opt(&root, ".schedule").is_none(), "nothing is drawn up while it is shut");
+    let triggers = harness::qa(&root, ".month-link");
+    assert_eq!(triggers.len(), app::strategy::candidates().len() + 1, "a row each, and the picker's");
+    for t in &triggers {
+        assert_eq!(t.get_attribute("aria-haspopup").as_deref(), Some("dialog"));
+    }
+
+    // It belongs to drawing down, so there is no way in while building up.
+    let deposits = harness::mount_with(&state_of(vec![row("Fund", "10000", "7", "0")], "10", "years"));
+    assert!(harness::q_opt(&deposits, ".month-link").is_none());
+}
+
+#[wasm_bindgen_test]
+async fn a_comparison_row_opens_the_dialog_on_its_own_strategy() {
+    // Picked: pro-rata. The row's button points the dialog elsewhere without
+    // touching the picker, and Close hands focus back to that button.
     let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], ""));
     let buttons = harness::qa(&root, ".strategy-compare .month-link");
     assert_eq!(buttons.len(), app::strategy::candidates().len(), "every row has one");
@@ -1482,22 +1537,55 @@ async fn a_comparison_row_opens_the_panel_on_its_own_strategy() {
         "the accessible name extends the visible text: {name}"
     );
 
-    harness::click(row_button);
-    harness::settle().await;
-
-    let toggle = harness::q(&root, ".panel-schedule .disclosure");
-    assert_eq!(toggle.get_attribute("aria-expanded").as_deref(), Some("true"));
-    assert!(harness::active_element() == Some(toggle), "focus moves to the panel it opened");
+    let dialog = open_schedule(&root, row_button).await;
+    let focused = harness::active_element().expect("something has focus");
+    assert!(dialog.contains(Some(focused.as_ref())), "focus moves into the dialog");
     let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
     assert_eq!(shown.value(), "preserve");
     let picked: web_sys::HtmlSelectElement = harness::q(&root, "#strategy").dyn_into().unwrap();
     assert_eq!(picked.value(), "pro-rata", "the picker is left alone");
     assert!(harness::any_text(&root, ".schedule-strategy", "Longest-lasting pot"));
+
+    close_schedule(&root).await;
+    assert!(harness::q_opt(&root, ".schedule").is_none(), "shut again, it draws nothing up");
+    assert!(
+        harness::active_element().as_ref() == Some(row_button),
+        "focus goes back to the row it came from"
+    );
 }
 
 #[wasm_bindgen_test]
-async fn the_panel_reads_a_sixty_forty_split_to_the_penny() {
+async fn the_picker_trigger_opens_on_the_picked_strategy() {
+    // The capped strategy has no comparison row, so the picker's own button is
+    // the way to its months. It follows the picker even after a row has
+    // pointed the dialog somewhere else.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], "capped"));
+    let trigger = picker_trigger(&root);
+    let name = trigger.get_attribute("aria-label").unwrap_or_default();
+    assert!(name.starts_with("Month by month") && name.contains("staying under a tax rate"), "{name}");
+
+    open_schedule(&root, &row_trigger(&root, "preserve")).await;
+    close_schedule(&root).await;
+
+    open_schedule(&root, &trigger).await;
+    let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
+    assert_eq!(shown.value(), "capped");
+    assert!(harness::any_text(&root, ".schedule-strategy", "Staying under a tax rate"));
+    close_schedule(&root).await;
+    assert!(harness::active_element().as_ref() == Some(&trigger), "focus goes back to the picker's button");
+
+    // Its name follows the picker, in the picker's own words.
+    let picker = harness::q(&root, "#strategy");
+    picker.dyn_ref::<web_sys::HtmlSelectElement>().unwrap().set_value("preserve");
+    harness::dispatch_change(&picker).await;
+    let name = picker_trigger(&root).get_attribute("aria-label").unwrap_or_default();
+    assert_eq!(name, "Month by month: longest-lasting pot");
+}
+
+#[wasm_bindgen_test]
+async fn the_dialog_reads_a_sixty_forty_split_to_the_penny() {
     let root = harness::mount_with(&sixty_forty_state());
+    open_schedule(&root, &picker_trigger(&root)).await;
 
     let start = harness::text(&root, ".schedule-start");
     assert!(start.contains("Value today"), "no growth phase, so the drawdown starts from today");
@@ -1521,10 +1609,42 @@ async fn the_panel_reads_a_sixty_forty_split_to_the_penny() {
         assert_eq!(harness::text_of(balance), money(0, 0));
     }
 
-    assert!(harness::any_text(&root, ".schedule-body .depletion-note", "Month 10 (Year 1)"));
+    assert!(harness::any_text(&root, ".schedule-dialog .depletion-note", "Month 10 (Year 1)"));
     assert!(harness::any_text(&root, ".schedule-end", "Nothing left to take after Year 1"));
     assert!(harness::q_opt(&root, "#schedule-y2").is_none(), "no empty year is listed");
     assert!(harness::q_opt(&root, ".error-msg").is_none());
+
+    // The table closes on the end of the drawdown period, after the note that
+    // stands in for the years with nothing to take: both holdings and the
+    // total at nothing.
+    let closing = closing_row(&root);
+    let end = harness::text_of(&closing);
+    assert!(end.starts_with("Value at the end"), "{end}");
+    let empty = harness::qa(&closing, "td").iter().filter(|c| harness::text_of(c) == money(0, 0)).count();
+    assert_eq!(empty, 3, "two holdings and the total: {end}");
+    close_schedule(&root).await;
+}
+
+#[wasm_bindgen_test]
+async fn the_value_at_the_end_agrees_with_the_final_year() {
+    let mut s = sixty_forty_state();
+    s.rows = vec![row("Fund", "300000", "5", "0")];
+    s.drawdown_value = "3".into();
+    let root = harness::mount_with(&s);
+    open_schedule(&root, &picker_trigger(&root)).await;
+    assert!(harness::q_opt(&root, ".schedule-end").is_none(), "the pot lasts, so there is no note");
+
+    let years = harness::qa(&root, ".schedule-year");
+    assert_eq!(years.len(), 3);
+    let final_balance = harness::qa(years.last().unwrap(), "td").last().map(harness::text_of).unwrap();
+    assert_ne!(final_balance, money(0, 0), "something is left");
+
+    // Straight under the final year, and the same figure to the penny.
+    let closing = closing_row(&root);
+    let cells = harness::qa(&closing, "td");
+    assert_eq!(harness::text_of(cells.last().unwrap()), final_balance, "the total is the final year's balance");
+    assert_eq!(harness::text_of(&cells[0]), final_balance, "one holding is the whole portfolio");
+    close_schedule(&root).await;
 }
 
 #[wasm_bindgen_test]
@@ -1533,6 +1653,7 @@ async fn opening_a_year_shows_its_months_and_keeps_the_button() {
     s.rows = vec![row("Fund", "300000", "5", "0")];
     s.drawdown_value = "3".into();
     let root = harness::mount_with(&s);
+    open_schedule(&root, &picker_trigger(&root)).await;
     assert_eq!(harness::qa(&root, "#schedule-y1 tr").len(), 12, "Year 1 starts open");
 
     let year2 = year_toggle(&root, "Year 2");
@@ -1550,10 +1671,17 @@ async fn opening_a_year_shows_its_months_and_keeps_the_button() {
     assert!(after == year2, "opening a year must not rebuild its button");
     assert_eq!(after.get_attribute("aria-expanded").as_deref(), Some("true"));
 
-    harness::click(&after);
+    // The years a reader opened outlast closing the dialog.
+    close_schedule(&root).await;
+    open_schedule(&root, &picker_trigger(&root)).await;
+    assert_eq!(harness::qa(&root, "#schedule-y2 tr").len(), 12, "Year 2 is still open");
+
+    let again = year_toggle(&root, "Year 2");
+    harness::click(&again);
     harness::settle().await;
     assert!(harness::qa(&root, "#schedule-y2 tr").is_empty());
     assert_eq!(harness::qa(&root, "#schedule-y1 tr").len(), 12, "other years are untouched");
+    close_schedule(&root).await;
 }
 
 #[wasm_bindgen_test]
@@ -1567,77 +1695,139 @@ async fn an_ordered_strategy_leaves_the_last_account_untouched_at_first() {
     a.account_kind = first.into();
     let mut b = row("Last", "300000", "0", "0");
     b.account_kind = last.into();
-    let mut s = taxed_state(vec![a, b], "cheapest");
-    s.schedule_open = true;
-    s.schedule_strategy = "conventional".into();
-    let root = harness::mount_with(&s);
+    let root = harness::mount_with(&taxed_state(vec![a, b], "cheapest"));
+    open_schedule(&root, &row_trigger(&root, "conventional")).await;
 
     let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
-    assert_eq!(shown.value(), "conventional", "the panel's strategy outranks the picker");
+    assert_eq!(shown.value(), "conventional", "the row's strategy outranks the picker");
     for m in harness::qa(&root, "#schedule-y1 tr") {
         let cells = harness::qa(&m, "td");
         assert_ne!(harness::text_of(&cells[0]), "\u{2014}", "the first account carries the drawdown");
         assert_eq!(harness::text_of(&cells[1]), "\u{2014}", "the last is not touched yet");
     }
     assert!(harness::any_text(&root, ".schedule thead th", "Tax"), "an ordered strategy is priced");
+    close_schedule(&root).await;
 }
 
 #[wasm_bindgen_test]
-async fn the_panel_follows_an_edit_once_typing_settles() {
+async fn the_dialog_takes_up_an_edit_made_while_it_was_shut() {
     let root = harness::mount_with(&sixty_forty_state());
     harness::settle().await;
+    open_schedule(&root, &picker_trigger(&root)).await;
+    let first = harness::text_of(&harness::qa(&root, "#schedule-y1 tr")[0]);
+    assert!(first.contains(&money(600, 0)), "{first}");
+    close_schedule(&root).await;
+
     let withdrawal = harness::input_by_id(&root, "withdrawal");
     harness::type_into(&withdrawal, "500").await;
     // Debounced like the comparison it reads from.
     harness::sleep(900).await;
+    open_schedule(&root, &picker_trigger(&root)).await;
     let first = harness::text_of(&harness::qa(&root, "#schedule-y1 tr")[0]);
     for figure in [money(300, 0), money(200, 0), money(500, 0)] {
         assert!(first.contains(&figure), "{figure} in month 1: {first}");
     }
+    close_schedule(&root).await;
 }
 
 #[wasm_bindgen_test]
-async fn a_shared_link_reopens_the_panel_where_it_was() {
-    let mut s = sixty_forty_state();
-    s.schedule_strategy = "preserve".into();
-    let root = harness::mount_with(&s);
-    let toggle = harness::q(&root, ".panel-schedule .disclosure");
-    assert_eq!(toggle.get_attribute("aria-expanded").as_deref(), Some("true"));
-    let shown: web_sys::HtmlSelectElement = harness::q(&root, "#schedule-strategy").dyn_into().unwrap();
-    assert_eq!(shown.value(), "preserve");
-
-    // And "Copy link" carries both back out.
-    harness::click(&harness::find_button(&root, "Copy link"));
-    harness::settle().await;
-    let hash = web_sys::window().unwrap().location().hash().unwrap();
-    let back = share::decode(&hash).expect("the link decodes");
-    assert!(back.schedule_open);
-    assert_eq!(back.schedule_strategy, "preserve");
-}
-
-#[wasm_bindgen_test]
-async fn a_panel_showing_the_capped_strategy_puts_its_cap_on_screen() {
-    // The picker is not capped, but the panel is: it projects with the rate
-    // cap, so the cap box must be there to see and change.
+async fn a_dialog_showing_the_capped_strategy_carries_its_own_cap() {
+    // The picker is not capped, so the form shows no cap box. The dialog,
+    // turned to the capped strategy, projects with the cap — and the form is
+    // inert behind it — so the dialog carries a box of its own.
     let mut s = taxed_state(vec![row("Fund", "300000", "5", "0")], "cheapest");
-    s.schedule_strategy = "capped".into();
     s.rate_cap = "20".into();
-    let shut = harness::mount_with(&s);
-    assert!(harness::q_opt(&shut, "#rate-cap").is_none(), "a shut panel uses nothing");
+    let root = harness::mount_with(&s);
+    open_schedule(&root, &row_trigger(&root, "cheapest")).await;
+    assert!(harness::q_opt(&root, "#schedule-rate-cap").is_none(), "no cap box for an uncapped strategy");
 
-    s.schedule_open = true;
-    let open = harness::mount_with(&s);
-    harness::settle().await;
-    assert_eq!(harness::input_by_id(&open, "rate-cap").value(), "20");
-    assert!(harness::any_text(&open, ".schedule-strategy", "Staying under a tax rate"));
+    let shown = harness::q(&root, "#schedule-strategy");
+    shown.dyn_ref::<web_sys::HtmlSelectElement>().unwrap().set_value("capped");
+    harness::dispatch_change(&shown).await;
+    assert!(harness::any_text(&root, ".schedule-strategy", "Staying under a tax rate"));
+    let cap = harness::input_by_id(&root, "schedule-rate-cap");
+    assert_eq!(cap.value(), "20", "the cap the form holds");
+    assert!(harness::q_opt(&root, "#rate-cap").is_none(), "the form's box stays with the picker");
+
+    // A cap that cannot be read is flagged on the dialog's box, and described
+    // by the dialog's own line: the form's message is behind the backdrop.
+    harness::type_into(&cap, "abc").await;
+    harness::sleep(900).await;
+    assert_eq!(cap.get_attribute("aria-invalid").as_deref(), Some("true"));
+    assert_eq!(cap.get_attribute("aria-describedby").as_deref(), Some("schedule-problem"));
+    let problem = harness::q(&root, ".schedule-dialog #schedule-problem");
+    assert!(!harness::text_of(&problem).is_empty());
+
+    harness::type_into(&cap, "20").await;
+    harness::sleep(900).await;
+    assert!(cap.get_attribute("aria-invalid").is_none(), "a good cap clears the flag");
+    assert!(harness::q_opt(&root, ".schedule").is_some(), "and the table is back");
+    close_schedule(&root).await;
 }
 
 #[wasm_bindgen_test]
-async fn the_month_by_month_panel_ranks_nothing() {
+async fn a_recomputation_under_the_dialog_keeps_the_row_that_opened_it() {
+    // Edit the form, then open a row's months before the debounce lands. The
+    // comparison then recomputes under the dialog. Its rows are keyed, so the
+    // figures change in place and the button that opened the dialog is still
+    // there to hand focus back to.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], ""));
+    harness::settle().await;
+    let opener = row_trigger(&root, "preserve");
+    let row = opener.closest("tr").unwrap().expect("the button sits in its row");
+    let before = harness::text_of(&row);
+
+    harness::type_into(&harness::input_by_id(&root, "withdrawal"), "1000").await;
+    open_schedule(&root, &opener).await;
+    harness::sleep(900).await;
+    assert_ne!(harness::text_of(&row), before, "the comparison recomputed under the dialog");
+    assert!(opener.is_connected(), "and kept the row's button rather than rebuilding it");
+
+    close_schedule(&root).await;
+    assert!(
+        harness::active_element().as_ref() == Some(&opener),
+        "focus goes back to the button that opened the dialog"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn the_month_by_month_headings_stay_put() {
+    // Twenty years with a few open is far taller than the dialog, so its body
+    // scrolls. The holding names must still be at the top of it.
+    let root = harness::mount_with(&taxed_state(vec![row("Fund", "300000", "5", "0")], ""));
+    open_schedule(&root, &row_trigger(&root, "pro-rata")).await;
+    for year in ["Year 2", "Year 3", "Year 4"] {
+        harness::click(&year_toggle(&root, year));
+        harness::settle().await;
+    }
+    let body = harness::q(&root, ".schedule-dialog .sheet-body");
+    body.set_scroll_top(800);
+    assert!(body.scroll_top() > 0, "the body scrolls");
+
+    let top = body.get_bounding_client_rect().top();
+    let heading = harness::q(&root, ".schedule thead th").get_bounding_client_rect().top();
+    assert!(
+        (heading - top).abs() < 2.0,
+        "the heading row sticks to the top of the body: {heading} vs {top}"
+    );
+    let row_heading = harness::q(&root, ".schedule tbody th[scope=\"row\"]");
+    assert_eq!(
+        web_sys::window().unwrap().get_computed_style(&row_heading).unwrap().unwrap()
+            .get_property_value("position").unwrap(),
+        "sticky",
+        "and so does the period column"
+    );
+    close_schedule(&root).await;
+}
+
+#[wasm_bindgen_test]
+async fn the_month_by_month_dialog_ranks_nothing() {
     let root = harness::mount_with(&sixty_forty_state());
-    let html = harness::q(&root, ".panel-schedule").inner_html().to_lowercase();
+    let dialog = open_schedule(&root, &picker_trigger(&root)).await;
+    let html = dialog.inner_html().to_lowercase();
+    close_schedule(&root).await;
     for banned in ["recommend", "should", "winner", "saves you"] {
-        assert!(!html.contains(banned), "the panel describes, never advises: found '{banned}'");
+        assert!(!html.contains(banned), "the dialog describes, never advises: found '{banned}'");
     }
 }
 

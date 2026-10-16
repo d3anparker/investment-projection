@@ -1,21 +1,34 @@
-//! The month-by-month panel: how one withdrawal strategy would take the money
+//! The month-by-month dialog: how one withdrawal strategy would take the money
 //! out, holding by holding, a year at a time.
 //!
-//! # A panel, not a page
+//! # A modal, not a page or a panel
 //!
 //! It was first planned as a page of its own, reached through the location
 //! fragment. Most of what that cost was navigation machinery whose only job was
 //! to undo the side effects of leaving: a router, the projection kept alive but
-//! hidden, a history rewrite, focus put back on return. A page would also be a
-//! snapshot, where a panel follows the form as it is edited. So it is a
-//! collapsible panel below the comparison, opened from any comparison row.
+//! hidden, a history rewrite, focus put back on return. It then shipped as a
+//! collapsible panel at the foot of the page, which needed none of that but gave
+//! the widest table on the page a card's width, inside a scroll box whose
+//! headings could not stick.
+//!
+//! A native `<dialog>` gets a page's room with none of a page's machinery: the
+//! projection stays mounted under the backdrop, nothing touches the location,
+//! and closing hands focus back to the button that opened it. Its body is the
+//! one scroll container, in both directions, so the holding names and the
+//! period column stay in view however many years are open.
+//!
+//! What it gave up, deliberately. The form is inert while the dialog is open, so
+//! the schedule takes up an edit the next time it opens rather than as you type
+//! — except the rate cap, which the dialog carries itself. And a shared link
+//! cannot reopen it, because "Copy link" is behind the backdrop.
 //!
 //! # Numbers
 //!
 //! Every figure comes from `calc::schedule`, which rounds each month so that it
 //! adds up; this module only formats. It is a separate memo for the same reason
 //! the comparison is: a strategy that cannot run, or empties the pot early, is
-//! not an input error, so it must never dim the projection or flag a control.
+//! not an input error, so it must never dim the projection or flag a form
+//! control. (The one control it does flag is its own cap box: see [`flags_cap`].)
 //!
 //! # Wording
 //!
@@ -24,25 +37,32 @@
 
 use std::collections::BTreeSet;
 
-use calc::{CalcInput, Schedule, ScheduleFigures, Strategy};
+use calc::{CalcError, CalcInput, Field, Schedule, ScheduleFigures, Strategy};
 use leptos::*;
 use rust_decimal::Decimal;
 use taxkit::{SimpleDate, TaxSystem};
 
 use crate::convert::StrategyChoice;
 use crate::format::{fmt_money, fmt_pct, horizon_label, money_or_dash};
+use crate::model::{adorned_field, bind_value};
+use crate::sheet::sheet_head;
 use crate::strategy::{probe, strategy_hint, strategy_label, strategy_options};
 
-/// What the panel shows: the strategy, and its schedule — or the reason it
+/// The id of the line that says why there is no schedule. The dialog's cap box
+/// is described by it, since the form's own error message is behind the
+/// backdrop.
+const PROBLEM_ID: &str = "schedule-problem";
+
+/// What the dialog shows: the strategy, and its schedule — or the reason it
 /// could not be drawn up.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Shown {
     pub strategy: Strategy,
-    pub result: Result<Schedule, String>,
+    pub result: Result<Schedule, CalcError>,
 }
 
-/// The strategy the panel shows: the one it was pointed at, or, when it has not
-/// been pointed at one, whatever the "Take it" picker says.
+/// The strategy the dialog shows: the one it was pointed at, or, when it has
+/// not been pointed at one, whatever the "Take it" picker says.
 pub fn chosen(shown: &str, picked: &str) -> StrategyChoice {
     StrategyChoice::from_id(if shown.trim().is_empty() { picked } else { shown })
 }
@@ -51,8 +71,15 @@ pub fn chosen(shown: &str, picked: &str) -> StrategyChoice {
 /// comparison's own [`probe`], so a strategy is projected here exactly as its
 /// comparison row was.
 pub fn show(input: &CalcInput, strategy: Strategy) -> Shown {
-    let result = calc::schedule(&probe(input, &strategy)).map_err(|e| e.message);
+    let result = calc::schedule(&probe(input, &strategy));
     Shown { strategy, result }
+}
+
+/// Whether the dialog's own rate-cap box is the control at fault: the schedule
+/// failed on the strategy. The same rule the form applies to its cap box, which
+/// `Field::Strategy` flags too.
+pub fn flags_cap(shown: &Shown) -> bool {
+    matches!(&shown.result, Err(e) if e.field == Some(Field::Strategy))
 }
 
 /// "Year 3", or "Year 31 (6 months)" for a part year at the end.
@@ -135,49 +162,68 @@ fn columns(schedule: &Schedule) -> Vec<Col> {
     cols
 }
 
-/// The month-by-month panel. Collapsed, it computes nothing: `shown` is `None`
-/// and the body is empty.
+/// The month-by-month dialog. Shut, it computes nothing: `shown` is `None` and
+/// the body is empty.
 ///
-/// `toggle` is the disclosure button, created by the caller so a comparison
-/// row can move focus to it when it opens the panel.
+/// A native `<dialog>` shown with `show_modal()`, as the glossary is, for the
+/// glossary's reasons: the focus trap, `Esc`, the inert background and the top
+/// layer come from the platform. `dialog` is created by the caller, so either
+/// trigger — a comparison row's button, or the one beside the "Take it" picker
+/// — can open it, and closing hands focus back to that trigger (see
+/// [`crate::sheet`]). Closing is a single path: the Close button calls
+/// `close()` too, so the `close` event is the only place `open` goes back to
+/// `false`.
 #[component]
-pub fn SchedulePanel(
+pub fn ScheduleDialog(
     open: RwSignal<bool>,
-    /// The `StrategyChoice` id the panel was pointed at; blank follows the
-    /// picker. Written by the panel's select.
+    /// The `StrategyChoice` id the dialog was pointed at; blank follows the
+    /// picker. Written by the dialog's select.
     chosen_id: RwSignal<String>,
-    /// The strategy the panel shows, resolved by the caller from `chosen_id`
+    /// The strategy the dialog shows, resolved by the caller from `chosen_id`
     /// and the picker.
     #[prop(into)]
     choice: Signal<StrategyChoice>,
     shown: Memo<Option<Shown>>,
+    /// The rate cap. The form's own box is inert behind the backdrop, so while
+    /// the dialog shows the capped strategy it carries a second box bound to
+    /// the same signal: it uses the cap, so the cap must be in reach.
+    rate_cap: RwSignal<String>,
     #[prop(into)] jurisdiction: Signal<String>,
     today: SimpleDate,
-    toggle: NodeRef<html::Button>,
+    dialog: NodeRef<html::Dialog>,
 ) -> impl IntoView {
-    // Which years are open. Outside the table's render closure, so a schedule
-    // that recomputes while the reader types keeps the years they opened.
+    // Which years are open. Outside the body's render closure, so a schedule
+    // that recomputes keeps the years the reader opened — and, since the
+    // dialog itself is never rebuilt, so does closing and reopening it.
     let expanded = create_rw_signal(BTreeSet::from([1u32]));
     let system = move || crate::jurisdiction::system_from(&jurisdiction.get());
+    // Memos, so the cap box is rebuilt only when the capped strategy comes or
+    // goes, and its invalid flag rewrites only when it flips. Only while open:
+    // shut, the box would be a second live copy of the form's, out of reach.
+    let capped = create_memo(move |_| open.get() && choice.get() == StrategyChoice::Capped);
+    let cap_bad = create_memo(move |_| shown.with(|s| s.as_ref().is_some_and(flags_cap)));
 
     view! {
-        <section class="panel panel-schedule" aria-labelledby="schedule-h">
-            <h2 id="schedule-h" class="disclosure-h">
-                <button type="button" class="disclosure" node_ref=toggle
-                    aria-expanded=move || open.get().to_string()
-                    aria-controls="schedule-body"
-                    on:click=move |_| open.update(|o| *o = !*o)>
-                    <span class="disclosure-mark" aria-hidden="true"></span>
-                    "Month by month"
-                </button>
-            </h2>
-            // Always in the DOM so the toggle's `aria-controls` names something;
-            // its contents exist only while open.
-            <div id="schedule-body" class="schedule-body" hidden=move || !open.get()>
-                // The picker sits outside the closure that rebuilds on every
-                // recomputation, so changing it never replaces the focused node.
+        <dialog
+            class="sheet schedule-dialog"
+            node_ref=dialog
+            aria-labelledby="schedule-h"
+            on:close=move |_| open.set(false)
+        >
+            {sheet_head("schedule-h", "Month by month", dialog)}
+            // Its own bar between the header and the scrolling body, as the
+            // glossary's filter is, so the strategy stays in reach however far
+            // down the years the reader has got. Outside the body's closure, so
+            // a recomputation never replaces the control being used.
+            <div class="sheet-bar">
+                // Built afresh on each opening, and only then. A trigger points
+                // the dialog at a strategy while it is shut, and toggling the
+                // `selected` attributes under a select that already exists does
+                // not move it (Firefox leaves the old option selected). Once
+                // open, the form is inert, so nothing but this select changes
+                // the choice — and then the select already shows it.
                 {move || open.get().then(|| view! {
-                    <div class="period-row schedule-pick">
+                    <div class="period-row">
                         <label for="schedule-strategy">"Show months for"</label>
                         <select id="schedule-strategy"
                             on:change=move |ev| chosen_id.set(event_target_value(&ev))>
@@ -185,6 +231,17 @@ pub fn SchedulePanel(
                         </select>
                     </div>
                 })}
+                {move || capped.get().then(|| {
+                    // Created inside the block, so a fresh binding effect
+                    // applies the current cap when the box mounts. Described by
+                    // the dialog's own problem line: the form's is behind the
+                    // backdrop.
+                    let cap_ref = bind_value(rate_cap);
+                    adorned_field("schedule-rate-cap", "never paying more than", "pct", "20",
+                        "at the margin", cap_ref, rate_cap, cap_bad, PROBLEM_ID)
+                })}
+            </div>
+            <div class="sheet-body">
                 {move || {
                     // Subscribe to the currency so a jurisdiction switch
                     // re-renders the figures, as `panel::stale_body` does.
@@ -193,7 +250,7 @@ pub fn SchedulePanel(
                     shown.with(|s| s.as_ref().map(|s| body(s, sys, today, expanded)))
                 }}
             </div>
-        </section>
+        </dialog>
     }
 }
 
@@ -212,10 +269,10 @@ fn body(
         </p>
     };
     let schedule = match &shown.result {
-        Err(message) => {
+        Err(e) => {
             return view! {
                 {intro}
-                <p class="schedule-problem">{message.clone()}</p>
+                <p id=PROBLEM_ID class="schedule-problem">{e.message.clone()}</p>
             }
             .into_view()
         }
@@ -253,8 +310,8 @@ fn body(
     .into_view()
 }
 
-/// The schedule as one table: a row for the starting values, then a row per
-/// year that opens onto its months.
+/// The schedule as one table: a row for the starting values, a row per year
+/// that opens onto its months, and a row for the values it ends on.
 fn table(
     schedule: &Schedule,
     system: &'static dyn TaxSystem,
@@ -289,21 +346,24 @@ fn table(
 
     // The values the drawdown starts from: today's, when there is no growth
     // phase, otherwise the handover pot. Keyed on the figure, as elsewhere.
-    let start_label = if out.horizon_months == 0 { "Value today" } else { "Value at the start" };
-    let start_cells = out
-        .investments
-        .iter()
-        .map(|inv| {
-            let v = inv.handover_value.unwrap_or(inv.current_value);
-            view! { <td class="num">{fmt_money(v)}</td> }
-        })
-        .collect_view();
-    let start_total = fmt_money(out.handover_total.unwrap_or(out.current_total));
-    // Nothing has moved yet, so only the balance column has a figure.
-    let start_tail = cols
-        .iter()
-        .map(|c| view! { <td class="num">{(*c == Col::Left).then(|| start_total.clone())}</td> })
-        .collect_view();
+    let start = balance(
+        "schedule-start",
+        if out.horizon_months == 0 { "Value today" } else { "Value at the start" },
+        out.investments.iter().map(|inv| inv.handover_value.unwrap_or(inv.current_value)),
+        out.handover_total.unwrap_or(out.current_total),
+        &cols,
+    );
+    // And the values it ends on, at the end of the drawdown period. The total
+    // is the same rounded point of the series as the final year's balance, so
+    // the two agree to the penny; the holdings are each rounded once, as the
+    // starting row's are.
+    let end = balance(
+        "schedule-final",
+        "Value at the end",
+        out.investments.iter().map(|inv| inv.projected_value),
+        out.projected_total,
+        &cols,
+    );
 
     let years = shown_years
         .map(|y| {
@@ -350,42 +410,62 @@ fn table(
 
     let span = 1 + out.investments.len() + cols.len();
     view! {
-        <div class="table-scroll">
-            <table class="breakdown schedule">
-                <caption class="table-note">
-                    "What this strategy would take from each holding, before tax, if the \
-                     returns you entered held exactly. Open a year to see its months; each \
-                     month\u{2019}s holdings add up to its total. An illustration of the \
-                     projection, not an instruction."
-                </caption>
-                <thead>
-                    <tr>
-                        <th scope="col">"Period"</th>
-                        {headings}
-                        {cols.iter().map(|c| view! {
-                            <th scope="col" class="num">{c.heading()}</th>
-                        }).collect_view()}
-                    </tr>
-                </thead>
-                <tbody class="schedule-start">
-                    <tr>
-                        <th scope="row">{start_label}</th>
-                        {start_cells}
-                        {start_tail}
+        <table class="breakdown schedule">
+            <caption class="table-note">
+                "What this strategy would take from each holding, before tax, if the \
+                 returns you entered held exactly. Open a year to see its months; each \
+                 month\u{2019}s holdings add up to its total. An illustration of the \
+                 projection, not an instruction."
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col">"Period"</th>
+                    {headings}
+                    {cols.iter().map(|c| view! {
+                        <th scope="col" class="num">{c.heading()}</th>
+                    }).collect_view()}
+                </tr>
+            </thead>
+            {start}
+            {years}
+            // In time order: the years the note stands in for come before
+            // the end of the drawdown period, which is what the last row is.
+            {ended.map(|last| view! {
+                <tbody>
+                    <tr class="schedule-end">
+                        <td colspan=span.to_string()>
+                            <span class="schedule-end-note">
+                                {format!("Nothing left to take after Year {last}.")}
+                            </span>
+                        </td>
                     </tr>
                 </tbody>
-                {years}
-                {ended.map(|last| view! {
-                    <tbody>
-                        <tr class="schedule-end">
-                            <td colspan=span.to_string()>
-                                {format!("Nothing left to take after Year {last}.")}
-                            </td>
-                        </tr>
-                    </tbody>
-                })}
-            </table>
-        </div>
+            })}
+            {end}
+        </table>
+    }
+}
+
+/// A row of balances rather than flows: each holding's value, and the total in
+/// the balance column. Nothing moves in it, so every other column is empty.
+/// Shared by the starting and closing rows, so the two always line up.
+fn balance(
+    class: &'static str,
+    label: &'static str,
+    values: impl Iterator<Item = Decimal>,
+    total: Decimal,
+    cols: &[Col],
+) -> impl IntoView {
+    view! {
+        <tbody class=class>
+            <tr>
+                <th scope="row">{label}</th>
+                {values.map(|v| view! { <td class="num">{fmt_money(v)}</td> }).collect_view()}
+                {cols.iter().map(|c| view! {
+                    <td class="num">{(*c == Col::Left).then(|| fmt_money(total))}</td>
+                }).collect_view()}
+            </tr>
+        </tbody>
     }
 }
 
@@ -415,7 +495,7 @@ mod tests {
         assert_eq!(
             chosen(StrategyChoice::Preserve.id(), StrategyChoice::Capped.id()),
             StrategyChoice::Preserve,
-            "a strategy the panel was pointed at outranks the picker"
+            "a strategy the dialog was pointed at outranks the picker"
         );
     }
 
@@ -436,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_in_the_panel_reads_as_advice() {
+    fn nothing_in_the_dialog_reads_as_advice() {
         // The same posture as the comparison: describe, never recommend.
         for text in [
             withdrawal_sentence(true, d("1500")),
@@ -450,9 +530,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn show_projects_through_the_comparisons_probe() {
-        let input = CalcInput {
+    fn twelve_months_of_one_thousand() -> CalcInput {
+        CalcInput {
             investments: vec![calc::InvestmentInput {
                 name: "Fund".into(),
                 value: "12000".into(),
@@ -470,7 +549,12 @@ mod tests {
             },
             currency: String::new(),
             tax: None,
-        };
+        }
+    }
+
+    #[test]
+    fn show_projects_through_the_comparisons_probe() {
+        let input = twelve_months_of_one_thousand();
         let s = show(&input, Strategy::preserve_growth());
         assert_eq!(s.strategy, Strategy::preserve_growth());
         let schedule = s.result.expect("an untaxed order-by-return projects");
@@ -480,5 +564,13 @@ mod tests {
         assert_eq!(schedule.runs_out.map(|r| r.month), Some(12));
         // No tax and no charge: the narrow table.
         assert!(columns(&schedule) == [Col::TakenOut, Col::Left]);
+    }
+
+    #[test]
+    fn a_strategy_that_cannot_run_flags_the_dialogs_cap_box() {
+        let input = twelve_months_of_one_thousand();
+        let bad = show(&input, Strategy::rate_capped("abc".into()));
+        assert!(flags_cap(&bad), "the strategy failed, so its control is marked: {:?}", bad.result);
+        assert!(!flags_cap(&show(&input, Strategy::pro_rata())), "a schedule that ran flags nothing");
     }
 }

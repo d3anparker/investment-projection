@@ -9,7 +9,7 @@
 use calc::{calculate, solve, CalcOutput, Field, InvestmentField, Solution};
 use crate::convert::{build_input, FormInput, RowData};
 use crate::goal::{build_goal, describe, GoalKind};
-use crate::model::{bind_value, new_row, remove_label, remove_row};
+use crate::model::{adorned_field, aria_text_input, bind_value, new_row, remove_label, remove_row};
 use crate::outcome::{invalid_attrs, Outcome, ANNOUNCE_DELAY, ERROR_ID};
 use crate::results::ResultsPanel;
 use crate::share::ShareState;
@@ -37,51 +37,6 @@ fn snapshot(rows: RwSignal<Vec<model::Row>>) -> Vec<RowData> {
             cost_basis: r.cost_basis.get(),
         })
         .collect()
-}
-
-/// A text `<input>` wired to `sig`, carrying the invalid-state a11y contract —
-/// `aria-invalid` + `aria-describedby` + `.field-invalid`, all driven by `bad` —
-/// in one place rather than repeated per control. The single spelling of that
-/// contract is what stops one control quietly drifting out of step with the rest.
-fn aria_text_input(
-    id: &'static str,
-    inputmode: &'static str,
-    placeholder: &'static str,
-    node_ref: NodeRef<html::Input>,
-    sig: RwSignal<String>,
-    bad: Memo<bool>,
-) -> impl IntoView {
-    view! {
-        <input id=id type="text" inputmode=inputmode placeholder=placeholder node_ref=node_ref
-            aria-invalid=move || invalid_attrs(bad.get()).0
-            aria-describedby=move || invalid_attrs(bad.get()).1
-            class:field-invalid=move || bad.get()
-            on:input=move |ev| sig.set(event_target_value(&ev)) />
-    }
-}
-
-/// One `label → adorned decimal input → trailing words` period-row, the shape the
-/// tax fieldset repeats. `adorn` is the adornment suffix (`"money"` / `"pct"`);
-/// the a11y contract comes from [`aria_text_input`].
-fn adorned_field(
-    id: &'static str,
-    label: &'static str,
-    adorn: &'static str,
-    placeholder: &'static str,
-    suffix: &'static str,
-    node_ref: NodeRef<html::Input>,
-    sig: RwSignal<String>,
-    bad: Memo<bool>,
-) -> impl IntoView {
-    view! {
-        <div class="period-row">
-            <label for=id>{label}</label>
-            <span class=format!("adorn adorn-{adorn}")>
-                {aria_text_input(id, "decimal", placeholder, node_ref, sig, bad)}
-            </span>
-            <span>{suffix}</span>
-        </div>
-    }
 }
 
 /// The current location fragment (`#v=…`), or `None` when there isn't one
@@ -218,27 +173,33 @@ pub fn App() -> impl IntoView {
     // Asked of `convert`'s one predicate rather than spelled out again here: the
     // controls have to appear exactly when the projection will use them, or a
     // hidden field silently changes the figures.
-    let tax_aware = move || {
+    // A memo for the reason `is_drawdown_m` is one: the tax details are gated on
+    // it, and as a closure every keystroke in a cap box (which it reads through
+    // the strategy) would rebuild them, the jurisdiction's own panel included.
+    let tax_aware_m = create_memo(move |_| {
         is_drawdown()
             && convert::keeps_tax_context(
                 active_sys(),
                 &convert::strategy_from(&strategy.get(), &rate_cap.get()),
             )
-    };
+    });
+    let tax_aware = move || tax_aware_m.get();
 
     // Goal-seek state. The target is blank in the example, which keeps the
     // feature inert (`build_goal` returns `None`) until the user asks a question.
     let goal_target = create_rw_signal(state.goal_target);
     let goal_kind = create_rw_signal(state.goal_kind);
 
-    // The month-by-month panel: whether it is open, and which strategy it shows
-    // (blank follows the "Take it" picker). View state rather than projection
-    // input, so — like the goal — neither is in `FormInput`, and opening the
-    // panel never re-runs `calculate`. The toggle's ref lives here so a
-    // comparison row can move focus to it.
-    let schedule_open = create_rw_signal(state.schedule_open);
-    let schedule_strategy = create_rw_signal(state.schedule_strategy);
-    let schedule_toggle = create_node_ref::<html::Button>();
+    // The month-by-month dialog: whether it is open, and which strategy it
+    // shows (blank follows the "Take it" picker). View state rather than
+    // projection input, so — like the goal — neither is in `FormInput`, and
+    // opening the dialog never re-runs `calculate`. Neither is in the share
+    // link either: "Copy link" is behind the backdrop while the dialog is
+    // open, so a link could only ever have carried it shut. The dialog's ref
+    // lives here so both of its triggers can open it.
+    let schedule_open = create_rw_signal(false);
+    let schedule_strategy = create_rw_signal(String::new());
+    let schedule_dialog = create_node_ref::<html::Dialog>();
 
     // Single source of computed truth. Reading every field's signal here means
     // the projection recomputes whenever any input changes; the memo caches the
@@ -314,25 +275,23 @@ pub fn App() -> impl IntoView {
     });
     let comparison = create_memo(move |_| comparison_input.with(strategy::compare));
     // Flips only when there starts or stops being anything to compare, so the
-    // two panels gated on it are not rebuilt on every recomputation — which
-    // would close the years a reader opened in the schedule. (The comparison's
-    // own table, row buttons included, still rebuilds when its rows change:
-    // `StrategyPanel` re-renders it from `rows`.)
+    // comparison panel gated on it is not rebuilt on every recomputation. (Nor
+    // is its table: `StrategyPanel` keys its rows, which update in place.)
     let comparing = create_memo(move |_| comparison.with(|c| !c.is_empty()));
 
-    // Which strategy the month-by-month panel shows, resolved once: the one it
-    // was pointed at, or the picker's. Both the panel's select and its
+    // Which strategy the month-by-month dialog shows, resolved once: the one it
+    // was pointed at, or the picker's. Both the dialog's select and its
     // projection read this, so the "blank follows the picker" rule has a single
     // home.
     let schedule_choice =
         create_memo(move |_| schedule::chosen(&schedule_strategy.get(), &strategy.get()));
-    // The month-by-month panel's projection: a separate memo for the
+    // The month-by-month dialog's projection: a separate memo for the
     // comparison's reasons, and off the same debounced input, since it is one
-    // more full projection on the typing path. `None` while the panel is
-    // closed, so a closed panel costs nothing at all. The rate cap is read
-    // untracked: it is part of the debounced input, whose refresh re-runs this
-    // once typing settles — tracked, every keystroke in the cap box would run a
-    // whole projection straight away.
+    // more full projection. `None` while the dialog is shut, so a shut dialog
+    // costs nothing at all. The rate cap is read untracked: it is part of the
+    // debounced input, whose refresh re-runs this once typing settles —
+    // tracked, every keystroke in the dialog's cap box would run a whole
+    // projection straight away.
     let schedule_shown = create_memo(move |_| {
         if !schedule_open.get() {
             return None;
@@ -340,28 +299,26 @@ pub fn App() -> impl IntoView {
         let chosen = schedule_choice.get().build(&rate_cap.get_untracked());
         Some(comparison_input.with(|input| schedule::show(input, chosen)))
     });
-    // Whether anything on the page is projecting the rate-capped strategy: the
-    // picker, or the open month-by-month panel. The cap box appears exactly
-    // then — a panel showing that strategy under another picker would
-    // otherwise use a cap the reader can neither see nor change. A memo, so
-    // the box is rebuilt only when this flips.
+    // Whether the picker projects the rate-capped strategy, which is exactly
+    // when the form's cap box appears. A memo, so the box is rebuilt only when
+    // this flips. The month-by-month dialog does not count: the form is inert
+    // behind it, so it carries a cap box of its own.
     let uses_cap = create_memo(move |_| {
-        let capped = convert::StrategyChoice::Capped;
-        convert::StrategyChoice::from_id(&strategy.get()) == capped
-            || (schedule_open.get() && schedule_choice.get() == capped)
+        convert::StrategyChoice::from_id(&strategy.get()) == convert::StrategyChoice::Capped
     });
-    // A comparison row's "Month by month": point the panel at that row's
-    // strategy, open it, and take focus there — which also scrolls it into view.
-    // Batched, so the panel projects once rather than once per signal. The
-    // toggle already exists (the panel renders whenever the comparison does),
-    // so focus can move at once.
+    // A "Month by month" button: the dialog, on the strategy `id` names (a
+    // comparison row's, or blank for the picker's button, which follows the
+    // picker). Batched, so it projects once rather than once per signal; the
+    // body is then built before `show_modal` moves focus into it. The button
+    // has already taken focus, so closing the dialog hands it back there (see
+    // `sheet`).
     let show_months = Callback::new(move |id: &'static str| {
         batch(|| {
             schedule_strategy.set(id.to_string());
             schedule_open.set(true);
         });
-        if let Some(button) = schedule_toggle.get_untracked() {
-            let _ = button.focus();
+        if let Some(dialog) = schedule_dialog.get_untracked() {
+            let _ = dialog.show_modal();
         }
     });
 
@@ -494,8 +451,6 @@ pub fn App() -> impl IntoView {
             uprate: uprate.get(),
             options: options.get(),
             jurisdiction: jurisdiction.get(),
-            schedule_open: schedule_open.get(),
-            schedule_strategy: schedule_strategy.get(),
         };
         // Write the fragment with replace_state so the shared link doesn't pile
         // up Back-button history entries. The status is set inside (address-bar
@@ -899,11 +854,24 @@ pub fn App() -> impl IntoView {
                                         convert::StrategyChoice::from_id(&strategy.get()) == choice
                                     })}
                                 </select>
+                                // The month-by-month dialog on whatever is
+                                // picked. The comparison rows open it too, but
+                                // the capped strategy has no row, so without
+                                // this a reader who picked it could not reach
+                                // its months directly. Blank, so the dialog
+                                // follows the picker. Named with the picker's own
+                                // wording, which is fixed: a label built from the
+                                // strategy would read the account names through
+                                // `active_system()`, which a jurisdiction switch
+                                // may not have reached yet.
+                                {strategy::month_link("", Signal::derive(move || {
+                                    convert::StrategyChoice::from_id(&strategy.get()).picker_label().to_string()
+                                }).into(), show_months)}
                             </div>
 
                             {move || uses_cap.get().then(|| {
                                 adorned_field("rate-cap", "never paying more than", "pct", "20",
-                                    "at the margin", cap_ref, rate_cap, strategy_bad)
+                                    "at the margin", cap_ref, rate_cap, strategy_bad, ERROR_ID)
                             })}
 
                             // Inert while splitting pro-rata: that ignores tax
@@ -911,14 +879,14 @@ pub fn App() -> impl IntoView {
                             // changed something.
                             {move || tax_aware().then(|| view! {
                                 {adorned_field("other-income", "Other taxable income", "money", "0",
-                                    "a year", income_ref, other_income, income_bad)}
+                                    "a year", income_ref, other_income, income_bad, ERROR_ID)}
                                 <div class="period-row">
                                     // A fixed access-age gate, so for someone already
                                     // drawing the age that matters is simply today's.
                                     <label for="age">
                                         {move || if has_growth() { "Age when it starts" } else { "Age now" }}
                                     </label>
-                                    {aria_text_input("age", "numeric", "60", age_ref, age, age_bad)}
+                                    {aria_text_input("age", "numeric", "60", age_ref, age, age_bad, ERROR_ID)}
                                     // A single-region tax system needs no control
                                     // at all, so it gets none rather than a
                                     // pointless one-option select.
@@ -939,7 +907,7 @@ pub fn App() -> impl IntoView {
                                     })}
                                 </div>
                                 {adorned_field("uprate", "Tax thresholds rise", "pct", "0",
-                                    "a year", uprate_ref, uprate, uprate_bad)}
+                                    "a year", uprate_ref, uprate, uprate_bad, ERROR_ID)}
                                 // The active jurisdiction's own bespoke controls,
                                 // if it has any. Rendered here inside the rebuilt
                                 // fieldset (so it follows the jurisdiction), and
@@ -1051,20 +1019,20 @@ pub fn App() -> impl IntoView {
                 })}
 
                 // How one of those ways would take the money out, month by
-                // month. Its own collapsible panel below the comparison it is
-                // opened from; collapsed by default, and computing nothing while
-                // it is. Gated on the comparison existing, so the two appear and
-                // go together.
-                {move || comparing.get().then(|| view! {
-                    <schedule::SchedulePanel
-                        open=schedule_open
-                        chosen_id=schedule_strategy
-                        choice=schedule_choice
-                        shown=schedule_shown
-                        jurisdiction=jurisdiction
-                        today=today.get_value()
-                        toggle=schedule_toggle/>
-                })}
+                // month: a full-screen modal opened from a comparison row or
+                // the picker, computing nothing while it is shut. Mounted
+                // unconditionally rather than gated with the comparison: shut,
+                // it is `display: none` and takes no grid cell, and its triggers
+                // can appear a debounce before the comparison does.
+                <schedule::ScheduleDialog
+                    open=schedule_open
+                    chosen_id=schedule_strategy
+                    choice=schedule_choice
+                    shown=schedule_shown
+                    rate_cap=rate_cap
+                    jurisdiction=jurisdiction
+                    today=today.get_value()
+                    dialog=schedule_dialog/>
             </main>
 
             <footer class="site-foot">
